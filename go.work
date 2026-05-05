@@ -1,0 +1,9 @@
+go 1.22
+
+use (
+	./proto
+	./services/messagequeue
+	./services/streamer
+	./services/collector
+	./services/gateway
+)

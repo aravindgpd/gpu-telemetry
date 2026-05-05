@@ -1,0 +1,152 @@
+## GPU Telemetry Pipeline — Helm Values
+## Override any value with: --set key=value or --values my-values.yaml
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# ── Message Queue Broker ───────────────────────────────────────────────────────
+messagequeue:
+  replicaCount: 1
+  image:
+    repository: gpu-telemetry/messagequeue
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    port: 9090
+    metricsPort: 9091
+  config:
+    partitions: 10
+    ringBufferSize: 65536   # must be power of 2
+    walDir: /data/wal
+    overflowPolicy: drop    # drop | block
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""        # "" = cluster default
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port:   "9091"
+
+# ── Telemetry Streamer ─────────────────────────────────────────────────────────
+streamer:
+  replicaCount: 2           # 1–10; STREAMER_TOTAL is set automatically to this value
+  image:
+    repository: gpu-telemetry/streamer
+    tag: latest
+    pullPolicy: IfNotPresent
+  config:
+    mqTopic: gpu-telemetry
+    streamIntervalMs: 100   # delay between streamed rows (ms)
+    csvPath: /data/gpu_telemetry.csv
+  persistence:
+    # CSV data volume — mount the gpu_telemetry.csv as a ConfigMap or PVC
+    enabled: true
+    size: 100Mi
+    storageClass: ""
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port:   "9091"
+
+# ── Telemetry Collector ────────────────────────────────────────────────────────
+collector:
+  replicaCount: 2
+  image:
+    repository: gpu-telemetry/collector
+    tag: latest
+    pullPolicy: IfNotPresent
+  config:
+    mqTopic: gpu-telemetry
+    consumerGroup: collector-group
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port:   "9091"
+
+# ── API Gateway ────────────────────────────────────────────────────────────────
+gateway:
+  replicaCount: 2
+  image:
+    repository: gpu-telemetry/gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+    metricsPort: 9091
+  ingress:
+    enabled: false          # set to true and configure host for external access
+    className: nginx
+    annotations: {}
+    host: gpu-telemetry.local
+    tls: []
+  config:
+    defaultLimit: 100
+    maxLimit: 1000
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port:   "9091"
+
+# ── PostgreSQL (Bitnami subchart) ──────────────────────────────────────────────
+postgresql:
+  enabled: true
+  auth:
+    database: gpu_telemetry
+    username: gpu_user
+    password: changeme        # override in production with a Secret
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+
+# ── External PostgreSQL (when postgresql.enabled=false) ───────────────────────
+externalDatabase:
+  host: ""
+  port: 5432
+  database: gpu_telemetry
+  username: gpu_user
+  # Reference an existing Secret key instead of embedding plaintext credentials
+  existingSecret: ""
+  existingSecretPasswordKey: password

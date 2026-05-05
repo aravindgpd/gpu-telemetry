@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package mq;
+
+option go_package = "github.com/aravindgpd/gpu-telemetry/proto/mq";
+
+// MessageQueue is the custom broker service connecting Streamers to Collectors.
+service MessageQueue {
+  // Publish sends a stream of messages to the broker.
+  rpc Publish(stream PublishRequest) returns (stream PublishResponse);
+
+  // Subscribe opens a server-push stream of messages for a consumer group member.
+  rpc Subscribe(SubscribeRequest) returns (stream DeliveryMessage);
+
+  // Acknowledge commits the processed offset for a partition in a consumer group.
+  rpc Acknowledge(AcknowledgeRequest) returns (AcknowledgeResponse);
+
+  // CreateTopic provisions a new topic with a fixed partition count.
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse);
+
+  // GetOffsets returns the committed offsets for a consumer group.
+  rpc GetOffsets(GetOffsetsRequest) returns (GetOffsetsResponse);
+
+  // HealthCheck returns broker liveness status.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// PublishRequest carries a single message from a producer.
+message PublishRequest {
+  string topic               = 1;
+  int32  partition           = 2; // -1 = broker selects via round-robin
+  bytes  payload             = 3;
+  map<string, string> headers = 4;
+}
+
+// PublishResponse acknowledges a published message with its assigned offset.
+message PublishResponse {
+  int32  partition = 1;
+  int64  offset    = 2;
+  string error     = 3; // non-empty on failure
+}
+
+// SubscribeRequest registers a consumer group member and opens a delivery stream.
+message SubscribeRequest {
+  string topic          = 1;
+  string consumer_group = 2;
+  string consumer_id    = 3; // unique per pod, e.g. pod name + UUID
+}
+
+// DeliveryMessage is a message pushed from the broker to a subscriber.
+// It may carry a payload (normal message) or a control signal (rebalance).
+message DeliveryMessage {
+  int32  partition         = 1;
+  int64  offset            = 2;
+  bytes  payload           = 3;
+  map<string, string> headers = 4;
+  int64  timestamp_ns      = 5; // publish time as Unix nanoseconds
+
+  // Control fields — set when this is a broker control message.
+  bool   rebalance_signal  = 6; // consumer must pause and re-read its assignments
+  repeated int32 assigned_partitions = 7; // new partition assignments after rebalance
+}
+
+// AcknowledgeRequest commits the highest successfully processed offset.
+message AcknowledgeRequest {
+  string topic          = 1;
+  string consumer_group = 2;
+  int32  partition      = 3;
+  int64  offset         = 4;
+}
+
+// AcknowledgeResponse confirms the offset commit.
+message AcknowledgeResponse {
+  bool   ok    = 1;
+  string error = 2;
+}
+
+// CreateTopicRequest provisions a new topic.
+message CreateTopicRequest {
+  string topic          = 1;
+  int32  partitions     = 2;
+  int64  retention_bytes = 3; // 0 = unlimited (ring buffer only, no eviction)
+}
+
+// CreateTopicResponse confirms topic creation.
+message CreateTopicResponse {
+  bool   ok    = 1;
+  string error = 2;
+}
+
+// GetOffsetsRequest queries committed offsets for a consumer group.
+message GetOffsetsRequest {
+  string topic          = 1;
+  string consumer_group = 2;
+}
+
+// GetOffsetsResponse returns per-partition committed offsets.
+message GetOffsetsResponse {
+  map<int32, int64> partition_offsets = 1;
+}
+
+// HealthCheckRequest is an empty liveness probe.
+message HealthCheckRequest {}
+
+// HealthCheckResponse reports broker readiness.
+message HealthCheckResponse {
+  bool   ready   = 1;
+  string version = 2;
+}

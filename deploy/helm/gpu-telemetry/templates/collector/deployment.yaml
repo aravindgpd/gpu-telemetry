@@ -1,0 +1,45 @@
+{{- $component := "collector" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ .Values.collector.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.collector.podAnnotations | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $component }}
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.collector.image.repository }}:{{ .Values.collector.image.tag }}"
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          env:
+            - name: MQ_ADDRESS
+              value: {{ include "gpu-telemetry.mqAddress" . | quote }}
+            - name: MQ_TOPIC
+              value: {{ .Values.collector.config.mqTopic | quote }}
+            - name: CONSUMER_GROUP
+              value: {{ .Values.collector.config.consumerGroup | quote }}
+            - name: CONSUMER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name   # pod name is unique — used as consumer ID
+            - name: DATABASE_URL
+              value: {{ include "gpu-telemetry.databaseURL" . | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}

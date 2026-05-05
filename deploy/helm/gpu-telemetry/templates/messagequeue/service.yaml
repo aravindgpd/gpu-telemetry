@@ -1,0 +1,20 @@
+{{- $component := "messagequeue" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  type: ClusterIP
+  clusterIP: None  # headless — required by StatefulSet for stable DNS
+  ports:
+    - name: grpc
+      port: {{ .Values.messagequeue.service.port }}
+      targetPort: grpc
+    - name: metrics
+      port: {{ .Values.messagequeue.service.metricsPort }}
+      targetPort: metrics
+  selector:
+    {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 4 }}

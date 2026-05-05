@@ -1,0 +1,76 @@
+{{- $component := "messagequeue" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  serviceName: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  replicas: {{ .Values.messagequeue.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.messagequeue.podAnnotations | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $component }}
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.messagequeue.image.repository }}:{{ .Values.messagequeue.image.tag }}"
+          imagePullPolicy: {{ .Values.messagequeue.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.messagequeue.service.port }}
+            - name: metrics
+              containerPort: {{ .Values.messagequeue.service.metricsPort }}
+          env:
+            - name: GRPC_PORT
+              value: {{ .Values.messagequeue.service.port | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.messagequeue.service.metricsPort | quote }}
+            - name: MQ_PARTITIONS
+              value: {{ .Values.messagequeue.config.partitions | quote }}
+            - name: MQ_RING_BUFFER_SIZE
+              value: {{ .Values.messagequeue.config.ringBufferSize | quote }}
+            - name: MQ_WAL_DIR
+              value: {{ .Values.messagequeue.config.walDir | quote }}
+            - name: MQ_OVERFLOW_POLICY
+              value: {{ .Values.messagequeue.config.overflowPolicy | quote }}
+          livenessProbe:
+            grpc:
+              port: {{ .Values.messagequeue.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            grpc:
+              port: {{ .Values.messagequeue.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.messagequeue.resources | nindent 12 }}
+          {{- if .Values.messagequeue.persistence.enabled }}
+          volumeMounts:
+            - name: wal-data
+              mountPath: {{ .Values.messagequeue.config.walDir }}
+          {{- end }}
+  {{- if .Values.messagequeue.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: wal-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.messagequeue.persistence.storageClass }}
+        storageClassName: {{ .Values.messagequeue.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.messagequeue.persistence.size }}
+  {{- end }}

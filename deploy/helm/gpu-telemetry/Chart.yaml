@@ -1,0 +1,19 @@
+apiVersion: v2
+name: gpu-telemetry
+description: Elastic GPU Telemetry Pipeline with custom Message Queue
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - gpu
+  - telemetry
+  - ai-cluster
+  - observability
+maintainers:
+  - name: Aravind
+    email: aravindgpd@gmail.com
+dependencies:
+  - name: postgresql
+    version: "15.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled

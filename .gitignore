@@ -1,0 +1,43 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Generated files (re-generate with `make proto` and `make openapi`)
+proto/mq/mq.pb.go
+proto/mq/mq_grpc.pb.go
+proto/telemetry/telemetry.pb.go
+api/openapi.yaml
+
+# Dependency dirs
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# Helm
+deploy/helm/gpu-telemetry/charts/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db

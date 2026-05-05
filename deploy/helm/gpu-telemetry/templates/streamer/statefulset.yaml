@@ -1,0 +1,52 @@
+{{- $component := "streamer" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  serviceName: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  replicas: {{ .Values.streamer.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.streamer.podAnnotations | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $component }}
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.streamer.image.repository }}:{{ .Values.streamer.image.tag }}"
+          imagePullPolicy: {{ .Values.streamer.image.pullPolicy }}
+          env:
+            - name: MQ_ADDRESS
+              value: {{ include "gpu-telemetry.mqAddress" . | quote }}
+            - name: MQ_TOPIC
+              value: {{ .Values.streamer.config.mqTopic | quote }}
+            # Pod ordinal injected via Downward API — gives us STREAMER_INDEX without a coordinator
+            - name: STREAMER_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+            - name: STREAMER_TOTAL
+              value: {{ .Values.streamer.replicaCount | quote }}
+            - name: CSV_PATH
+              value: {{ .Values.streamer.config.csvPath | quote }}
+            - name: STREAM_INTERVAL_MS
+              value: {{ .Values.streamer.config.streamIntervalMs | quote }}
+          volumeMounts:
+            - name: csv-data
+              mountPath: /data
+              readOnly: true
+          resources:
+            {{- toYaml .Values.streamer.resources | nindent 12 }}
+      volumes:
+        - name: csv-data
+          configMap:
+            name: {{ include "gpu-telemetry.fullname" . }}-csv-data

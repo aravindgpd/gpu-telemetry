@@ -1,0 +1,19 @@
+{{- $component := "gateway" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http
+    - name: metrics
+      port: {{ .Values.gateway.service.metricsPort }}
+      targetPort: metrics
+  selector:
+    {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 4 }}

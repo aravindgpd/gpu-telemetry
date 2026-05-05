@@ -1,0 +1,54 @@
+{{- $component := "gateway" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.gateway.podAnnotations | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ $component }}
+          image: "{{ .Values.global.imageRegistry }}{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.service.port }}
+            - name: metrics
+              containerPort: {{ .Values.gateway.service.metricsPort }}
+          env:
+            - name: HTTP_PORT
+              value: {{ .Values.gateway.service.port | quote }}
+            - name: METRICS_PORT
+              value: {{ .Values.gateway.service.metricsPort | quote }}
+            - name: DATABASE_URL
+              value: {{ include "gpu-telemetry.databaseURL" . | quote }}
+            - name: API_DEFAULT_LIMIT
+              value: {{ .Values.gateway.config.defaultLimit | quote }}
+            - name: API_MAX_LIMIT
+              value: {{ .Values.gateway.config.maxLimit | quote }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}

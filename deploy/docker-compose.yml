@@ -1,0 +1,181 @@
+## Docker Compose — full local development stack
+## Usage: make up | make down | make logs
+##
+## Services:
+##   postgres       — shared PostgreSQL 16 instance
+##   messagequeue   — custom gRPC MQ broker (port 9090)
+##   streamer-0     — streamer pod 0 (STREAMER_INDEX=0, STREAMER_TOTAL=2)
+##   streamer-1     — streamer pod 1 (STREAMER_INDEX=1, STREAMER_TOTAL=2)
+##   collector-0    — collector pod 0
+##   collector-1    — collector pod 1
+##   gateway        — REST API gateway (port 8080, Swagger UI at /swagger/)
+
+name: gpu-telemetry
+
+volumes:
+  postgres_data:
+  mq_wal_data:
+
+networks:
+  telemetry:
+    driver: bridge
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       gpu_telemetry
+      POSTGRES_USER:     gpu_user
+      POSTGRES_PASSWORD: changeme
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - telemetry
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpu_user -d gpu_telemetry"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Message Queue Broker ───────────────────────────────────────────────────
+  messagequeue:
+    build:
+      context: ..
+      dockerfile: services/messagequeue/Dockerfile
+    restart: unless-stopped
+    environment:
+      GRPC_PORT:            "9090"
+      METRICS_PORT:         "9091"
+      MQ_PARTITIONS:        "10"
+      MQ_RING_BUFFER_SIZE:  "65536"
+      MQ_WAL_DIR:           "/data/wal"
+      MQ_OVERFLOW_POLICY:   "drop"
+    volumes:
+      - mq_wal_data:/data/wal
+    ports:
+      - "9090:9090"   # gRPC
+      - "9091:9091"   # Prometheus metrics
+    networks:
+      - telemetry
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:9090"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ── Telemetry Streamer (pod 0) ─────────────────────────────────────────────
+  streamer-0:
+    build:
+      context: ..
+      dockerfile: services/streamer/Dockerfile
+    restart: unless-stopped
+    environment:
+      MQ_ADDRESS:          "messagequeue:9090"
+      MQ_TOPIC:            "gpu-telemetry"
+      STREAMER_INDEX:      "0"
+      STREAMER_TOTAL:      "2"
+      CSV_PATH:            "/data/gpu_telemetry.csv"
+      STREAM_INTERVAL_MS:  "100"
+      METRICS_PORT:        "9091"
+    volumes:
+      - ../data/gpu_telemetry.csv:/data/gpu_telemetry.csv:ro
+    networks:
+      - telemetry
+    depends_on:
+      messagequeue:
+        condition: service_healthy
+
+  # ── Telemetry Streamer (pod 1) ─────────────────────────────────────────────
+  streamer-1:
+    build:
+      context: ..
+      dockerfile: services/streamer/Dockerfile
+    restart: unless-stopped
+    environment:
+      MQ_ADDRESS:          "messagequeue:9090"
+      MQ_TOPIC:            "gpu-telemetry"
+      STREAMER_INDEX:      "1"
+      STREAMER_TOTAL:      "2"
+      CSV_PATH:            "/data/gpu_telemetry.csv"
+      STREAM_INTERVAL_MS:  "100"
+      METRICS_PORT:        "9092"
+    volumes:
+      - ../data/gpu_telemetry.csv:/data/gpu_telemetry.csv:ro
+    networks:
+      - telemetry
+    depends_on:
+      messagequeue:
+        condition: service_healthy
+
+  # ── Telemetry Collector (pod 0) ────────────────────────────────────────────
+  collector-0:
+    build:
+      context: ..
+      dockerfile: services/collector/Dockerfile
+    restart: unless-stopped
+    environment:
+      MQ_ADDRESS:     "messagequeue:9090"
+      MQ_TOPIC:       "gpu-telemetry"
+      CONSUMER_ID:    "collector-0"
+      CONSUMER_GROUP: "collector-group"
+      DATABASE_URL:   "postgres://gpu_user:changeme@postgres:5432/gpu_telemetry"
+      METRICS_PORT:   "9091"
+    networks:
+      - telemetry
+    depends_on:
+      postgres:
+        condition: service_healthy
+      messagequeue:
+        condition: service_healthy
+
+  # ── Telemetry Collector (pod 1) ────────────────────────────────────────────
+  collector-1:
+    build:
+      context: ..
+      dockerfile: services/collector/Dockerfile
+    restart: unless-stopped
+    environment:
+      MQ_ADDRESS:     "messagequeue:9090"
+      MQ_TOPIC:       "gpu-telemetry"
+      CONSUMER_ID:    "collector-1"
+      CONSUMER_GROUP: "collector-group"
+      DATABASE_URL:   "postgres://gpu_user:changeme@postgres:5432/gpu_telemetry"
+      METRICS_PORT:   "9092"
+    networks:
+      - telemetry
+    depends_on:
+      postgres:
+        condition: service_healthy
+      messagequeue:
+        condition: service_healthy
+
+  # ── API Gateway ────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ..
+      dockerfile: services/gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      HTTP_PORT:    "8080"
+      METRICS_PORT: "9091"
+      DATABASE_URL: "postgres://gpu_user:changeme@postgres:5432/gpu_telemetry"
+    ports:
+      - "8080:8080"   # REST API + Swagger UI
+      - "9093:9091"   # Prometheus metrics
+    networks:
+      - telemetry
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s

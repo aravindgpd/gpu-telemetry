@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package telemetry;
+
+option go_package = "github.com/aravindgpd/gpu-telemetry/proto/telemetry";
+
+// TelemetryRecord is the serialized payload published by a Streamer and
+// deserialized by a Collector. It maps directly to one DCGM exporter CSV row
+// (long/melted format: one record per <timestamp, gpu, metric_name> sample).
+message TelemetryRecord {
+  // ingested_unix_ns is the processing time (when the Streamer published this
+  // record), in Unix nanoseconds. Per spec, this is the canonical telemetry
+  // timestamp used for downstream ordering and retention.
+  int64  ingested_unix_ns = 1;
+
+  // sample_unix_ns is the original scrape timestamp from the DCGM exporter
+  // CSV row (the "timestamp" column), in Unix nanoseconds. Kept for late-
+  // arrival analysis and source-of-truth reconstruction.
+  int64  sample_unix_ns   = 2;
+
+  // DCGM metric identifier, e.g. "DCGM_FI_DEV_GPU_UTIL",
+  // "DCGM_FI_DEV_POWER_USAGE", "DCGM_FI_DEV_GPU_TEMP".
+  string metric_name      = 3;
+
+  // Per-GPU identifiers (CSV columns: uuid, gpu_id, device, modelName).
+  string uuid             = 4; // globally unique, e.g. "GPU-5fd4f087-86f3-7a43-..."
+  string gpu_index        = 5; // per-host index ("0".."7"), DCGM `gpu` label
+  string device           = 6; // "nvidia0", "nvidia1", ...
+  string model_name       = 7; // "NVIDIA H100 80GB HBM3"
+
+  // Host and Kubernetes context (CSV columns: Hostname, container, pod, namespace).
+  // Any may be empty for non-k8s deployments.
+  string hostname         = 8;
+  string container        = 9;
+  string pod              = 10;
+  string namespace        = 11;
+
+  // Numeric metric value. double covers both integer-valued DCGM fields
+  // (DCGM_FI_DEV_FB_USED, DCGM_FI_DEV_SM_CLOCK, DCGM_FI_DEV_GPU_TEMP) and
+  // float-valued ones (DCGM_FI_DEV_POWER_USAGE, DCGM_FI_DEV_GPU_UTIL).
+  double value            = 12;
+
+  // labels_raw is the original Prometheus label string from the CSV row
+  // (the "labels_raw" column), preserved unparsed for debugging and for
+  // labels not modeled as fields above (e.g. DCGM_FI_DRIVER_VERSION, job,
+  // instance).
+  string labels_raw       = 13;
+}
