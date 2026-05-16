@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/aravindgpd/gpu-telemetry/streamer/internal/config"
 	"github.com/aravindgpd/gpu-telemetry/streamer/internal/coordinator"
+	"github.com/aravindgpd/gpu-telemetry/streamer/internal/obs"
 	"github.com/aravindgpd/gpu-telemetry/streamer/internal/publisher"
 	"github.com/aravindgpd/gpu-telemetry/streamer/internal/reader"
 	"go.uber.org/zap"
@@ -38,9 +40,18 @@ func main() {
 
 	csvReader := reader.New(cfg.CSVPath, cfg.StreamIntervalMs, logger)
 
+	// Observability sidecar: /healthz, /readyz, /metrics on a dedicated port.
+	obsServer := obs.Start(cfg.MetricsPort, logger, func() error { return nil })
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = obsServer.Shutdown(shutdownCtx)
+	}()
+
 	logger.Info("telemetry streamer starting",
 		zap.Int("index", cfg.StreamerIndex),
 		zap.Int("total", cfg.StreamerTotal),
+		zap.Int("metrics_port", cfg.MetricsPort),
 		zap.String("csv_path", cfg.CSVPath),
 		zap.String("mq_address", cfg.MQAddress),
 	)

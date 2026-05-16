@@ -25,7 +25,7 @@ func Load() (*Config, error) {
 		Topic:            envStr("MQ_TOPIC", "gpu-telemetry"),
 		StreamerIndex:    envInt("STREAMER_INDEX", 0),
 		StreamerTotal:    envInt("STREAMER_TOTAL", 1),
-		CSVPath:          envStr("CSV_PATH", "/data/gpu_telemetry.csv"),
+		CSVPath:          envStr("CSV_PATH", "/data/sample_data.csv"),
 		StreamIntervalMs: envInt("STREAM_INTERVAL_MS", 100),
 		MetricsPort:      envInt("METRICS_PORT", 9091),
 	}
