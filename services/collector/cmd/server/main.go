@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/aravindgpd/gpu-telemetry/collector/internal/config"
 	"github.com/aravindgpd/gpu-telemetry/collector/internal/consumer"
+	"github.com/aravindgpd/gpu-telemetry/collector/internal/obs"
 	"github.com/aravindgpd/gpu-telemetry/collector/internal/store"
 	"go.uber.org/zap"
 )
@@ -43,10 +45,21 @@ func main() {
 	}
 	defer c.Close()
 
+	// Observability sidecar: /healthz, /readyz, /metrics. Readiness reports DB health.
+	obsServer := obs.Start(cfg.MetricsPort, logger, func() error {
+		return db.Ping(context.Background())
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = obsServer.Shutdown(shutdownCtx)
+	}()
+
 	logger.Info("telemetry collector starting",
 		zap.String("consumer_id", cfg.ConsumerID),
 		zap.String("mq_address", cfg.MQAddress),
 		zap.String("topic", cfg.Topic),
+		zap.Int("metrics_port", cfg.MetricsPort),
 	)
 
 	if err := c.Run(ctx); err != nil {
