@@ -1,0 +1,26 @@
+# Patterns to ignore when building Helm packages.
+# https://helm.sh/docs/chart_template_guide/helm_charts/#the-helmignore-file
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.bak
+*.tmp
+*.orig
+
+# Source-control metadata
+.git/
+.gitignore
+.gitattributes
+
+# CI / lint output
+.helmignore
+*.log
+
+# Local override files — never package these
+values.local.yaml
+values.dev.yaml
+values.prod.yaml

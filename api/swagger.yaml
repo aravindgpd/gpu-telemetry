@@ -1,0 +1,171 @@
+basePath: /api/v1
+definitions:
+  handler.errorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  store.GPU:
+    properties:
+      created_at:
+        type: string
+      device:
+        type: string
+      gpu_index:
+        type: string
+      hostname:
+        type: string
+      model_name:
+        type: string
+      updated_at:
+        type: string
+      uuid:
+        type: string
+    type: object
+  store.TelemetryRecord:
+    properties:
+      container:
+        type: string
+      id:
+        type: integer
+      ingested_at:
+        type: string
+      labels_raw:
+        type: string
+      metric_name:
+        type: string
+      namespace:
+        type: string
+      pod:
+        type: string
+      sample_at:
+        type: string
+      uuid:
+        type: string
+      value:
+        type: number
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: aravindgpd@gmail.com
+    name: API Support
+  description: REST API for querying GPU telemetry data from an AI cluster.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://swagger.io/terms/
+  title: GPU Telemetry API
+  version: "1.0"
+paths:
+  /gpus:
+    get:
+      description: Returns a list of all GPU IDs for which telemetry data has been
+        collected.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/store.GPU'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handler.errorResponse'
+      summary: List all GPUs
+      tags:
+      - gpus
+  /gpus/{id}/telemetry:
+    get:
+      description: Returns DCGM metric samples for the specified GPU UUID, ordered
+        by sample_at ascending. Optionally filter by metric_name.
+      parameters:
+      - description: GPU UUID (e.g. GPU-5fd4f087-86f3-7a43-...)
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: DCGM metric filter (e.g. DCGM_FI_DEV_GPU_UTIL). Omit for all
+          metrics.
+        in: query
+        name: metric_name
+        type: string
+      - description: Inclusive lower bound on sample_at (RFC3339, e.g. 2025-07-18T20:42:34Z)
+        in: query
+        name: start_time
+        type: string
+      - description: Inclusive upper bound on sample_at (RFC3339)
+        in: query
+        name: end_time
+        type: string
+      - description: Maximum records to return (default 100, max 1000)
+        in: query
+        name: limit
+        type: integer
+      - description: Pagination offset (default 0)
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/store.TelemetryRecord'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.errorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.errorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handler.errorResponse'
+      summary: Get GPU telemetry
+      tags:
+      - gpus
+  /healthz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness probe
+      tags:
+      - health
+  /readyz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handler.errorResponse'
+      summary: Readiness probe
+      tags:
+      - health
+schemes:
+- http
+- https
+swagger: "2.0"

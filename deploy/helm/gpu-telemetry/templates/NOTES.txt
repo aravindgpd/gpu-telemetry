@@ -1,0 +1,69 @@
+────────────────────────────────────────────────────────────────────────────
+GPU Telemetry Pipeline — release "{{ .Release.Name }}" installed in
+namespace "{{ .Release.Namespace }}".
+────────────────────────────────────────────────────────────────────────────
+
+Verify the rollout:
+
+  kubectl --namespace {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+You should see (eventually):
+  - {{ .Release.Name }}-postgresql-0                       (Bitnami subchart)
+  - {{ include "gpu-telemetry.fullname" . }}-messagequeue-0
+  - {{ include "gpu-telemetry.fullname" . }}-streamer-0..N
+  - {{ include "gpu-telemetry.fullname" . }}-collector-...
+  - {{ include "gpu-telemetry.fullname" . }}-gateway-...
+
+────────────────────────────────────────────────────────────────────────────
+Reaching the API:
+────────────────────────────────────────────────────────────────────────────
+
+{{- if .Values.gateway.ingress.enabled }}
+Ingress is enabled. Browse to:
+
+  http://{{ .Values.gateway.ingress.host }}/api/v1/gpus
+{{- else }}
+No ingress configured. Port-forward the gateway to test locally:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward \
+      svc/{{ include "gpu-telemetry.fullname" . }}-gateway \
+      {{ .Values.gateway.service.port }}:{{ .Values.gateway.service.port }}
+
+Then in another terminal:
+
+  curl http://localhost:{{ .Values.gateway.service.port }}/api/v1/gpus
+  curl 'http://localhost:{{ .Values.gateway.service.port }}/api/v1/gpus/<UUID>/telemetry?limit=20'
+{{- end }}
+
+────────────────────────────────────────────────────────────────────────────
+About the Streamer CSV data:
+────────────────────────────────────────────────────────────────────────────
+{{- if not .Values.streamer.csvData }}
+
+⚠  streamer.csvData is empty — the streamer pods will read an empty CSV and
+    won't publish telemetry. To install with the bundled sample data:
+
+      helm upgrade --install {{ .Release.Name }} {{ .Chart.Name }} \
+           --namespace {{ .Release.Namespace }} \
+           --set-file streamer.csvData=data/sample_data.csv
+
+    or supply your own DCGM CSV file the same way.
+{{- else }}
+
+✓  CSV data was loaded from --set-file ({{ len .Values.streamer.csvData }} bytes)
+   into the ConfigMap. Streamer pods will replay it in a loop.
+{{- end }}
+
+────────────────────────────────────────────────────────────────────────────
+Scaling:
+────────────────────────────────────────────────────────────────────────────
+
+  # Scale streamers (also bumps STREAMER_TOTAL — re-render the chart)
+  helm upgrade {{ .Release.Name }} {{ .Chart.Name }} \
+      --namespace {{ .Release.Namespace }} \
+      --reuse-values --set streamer.replicaCount=4
+
+  # Collectors and the gateway are HPA-controlled by default — see
+  # `kubectl get hpa --namespace {{ .Release.Namespace }}` for current state.
+
+────────────────────────────────────────────────────────────────────────────

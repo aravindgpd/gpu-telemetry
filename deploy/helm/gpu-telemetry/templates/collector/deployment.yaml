@@ -35,11 +35,10 @@ spec:
                   fieldPath: metadata.name   # pod name is unique — used as consumer ID
             - name: DATABASE_URL
               value: {{ include "gpu-telemetry.databaseURL" . | quote }}
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8081
-            initialDelaySeconds: 10
-            periodSeconds: 15
+          # NOTE: no liveness/readiness probes wired yet — the Collector has no
+          # HTTP health endpoint and runs on a distroless image with no shell.
+          # Once a /healthz handler is added (planned for a follow-up), use:
+          #   livenessProbe: { httpGet: { path: /healthz, port: <metrics-port> } }
+          # Kubernetes still restarts the pod if the container process exits.
           resources:
             {{- toYaml .Values.collector.resources | nindent 12 }}

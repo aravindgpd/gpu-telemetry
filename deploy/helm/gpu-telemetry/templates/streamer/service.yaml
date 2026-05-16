@@ -1,0 +1,23 @@
+{{- /*
+Headless service for the Streamer StatefulSet. Required so each replica gets a
+stable DNS name (streamer-0, streamer-1, ...) and the Downward API can derive
+STREAMER_INDEX from the pod ordinal. The service is also where Prometheus
+discovers the metrics endpoint via the pod selector.
+*/ -}}
+{{- $component := "streamer" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  type: ClusterIP
+  clusterIP: None  # headless — gives streamer-0.streamer.<ns>.svc.cluster.local DNS
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+  selector:
+    {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 4 }}

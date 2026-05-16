@@ -44,13 +44,12 @@ streamer:
     pullPolicy: IfNotPresent
   config:
     mqTopic: gpu-telemetry
-    streamIntervalMs: 100   # delay between streamed rows (ms)
-    csvPath: /data/gpu_telemetry.csv
-  persistence:
-    # CSV data volume — mount the gpu_telemetry.csv as a ConfigMap or PVC
-    enabled: true
-    size: 100Mi
-    storageClass: ""
+    streamIntervalMs: 100              # delay between streamed rows (ms)
+    csvPath: /data/sample_data.csv     # path inside the container; matches ConfigMap mount
+  # csvData carries the full DCGM CSV body. Supply via --set-file at install:
+  #   helm install ... --set-file streamer.csvData=data/sample_data.csv
+  # Default empty string renders an empty CSV (Streamer warns but doesn't crash).
+  csvData: ""
   autoscaling:
     enabled: true
     minReplicas: 1

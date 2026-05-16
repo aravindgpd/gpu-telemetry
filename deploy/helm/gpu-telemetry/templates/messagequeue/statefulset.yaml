@@ -44,14 +44,18 @@ spec:
               value: {{ .Values.messagequeue.config.walDir | quote }}
             - name: MQ_OVERFLOW_POLICY
               value: {{ .Values.messagequeue.config.overflowPolicy | quote }}
+          # TCP probe is used here instead of a gRPC probe because the broker
+          # does not yet implement the standard grpc.health.v1.Health service.
+          # The TCP-on-9090 check is sufficient — if the gRPC server has crashed,
+          # the listener is gone and the probe fails.
           livenessProbe:
-            grpc:
-              port: {{ .Values.messagequeue.service.port }}
+            tcpSocket:
+              port: grpc
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
-            grpc:
-              port: {{ .Values.messagequeue.service.port }}
+            tcpSocket:
+              port: grpc
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:

@@ -1,0 +1,29 @@
+{{- /*
+ConfigMap holding the DCGM-format CSV that all Streamer replicas read.
+
+The CSV body is supplied via --set-file at install time, e.g.
+
+  helm install gpu-telemetry ./deploy/helm/gpu-telemetry \
+       --set-file streamer.csvData=data/sample_data.csv
+
+This keeps the chart small (no checked-in copy of the data file) and lets you
+swap in a different dataset without editing the chart.
+
+If `streamer.csvData` is empty the ConfigMap is rendered with an empty file so
+the volume mount still succeeds — the Streamer will warn on the empty CSV but
+won't crashloop.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-csv-data
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: streamer
+data:
+  sample_data.csv: |
+    {{- if .Values.streamer.csvData }}
+    {{- .Values.streamer.csvData | nindent 4 }}
+    {{- else }}
+    timestamp,metric_name,gpu_id,device,uuid,modelName,Hostname,container,pod,namespace,value,labels_raw
+    {{- end }}

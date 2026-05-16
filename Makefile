@@ -15,28 +15,26 @@ SERVICES := messagequeue streamer collector gateway
 ## ── Code Generation ──────────────────────────────────────────────────────────
 
 .PHONY: proto
-proto: ## Generate Go code from proto/mq/mq.proto and proto/telemetry/telemetry.proto
-	@which protoc > /dev/null || (echo "ERROR: protoc not found. Install protobuf compiler."; exit 1)
-	@which protoc-gen-go > /dev/null || go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-	@which protoc-gen-go-grpc > /dev/null || go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-	protoc \
-		--go_out=. --go_opt=paths=source_relative \
-		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		proto/mq/mq.proto proto/telemetry/telemetry.proto
+proto: ## Generate Go code from proto/mq/mq.proto and proto/telemetry/telemetry.proto via buf
+	@which buf > /dev/null || (echo "ERROR: buf not found. Install via 'go install github.com/bufbuild/buf/cmd/buf@latest'"; exit 1)
+	buf generate
 	@echo "Proto generation complete."
 
+.PHONY: proto-lint
+proto-lint: ## Lint .proto files
+	@which buf > /dev/null || (echo "ERROR: buf not found"; exit 1)
+	buf lint
+
 .PHONY: openapi
-openapi: ## Generate OpenAPI spec from swaggo annotations → api/openapi.yaml
+openapi: ## Generate OpenAPI spec from swaggo annotations → api/swagger.{yaml,json}
 	@which swag > /dev/null || go install github.com/swaggo/swag/cmd/swag@latest
 	mkdir -p api
 	cd services/gateway && swag init \
-		--generalInfo cmd/server/main.go \
-		--dir ./cmd/server,./internal/handler,./internal/store \
-		--output ../../api \
-		--outputTypes yaml \
-		--parseDependency \
-		--parseInternal
-	@echo "OpenAPI spec written to api/openapi.yaml"
+		-g main.go \
+		-d ./cmd/server,./internal/handler,./internal/store \
+		-o ../../api \
+		--outputTypes yaml,json
+	@echo "OpenAPI spec written to api/swagger.yaml + api/swagger.json"
 
 ## ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -136,16 +134,16 @@ coverage-check: coverage ## Fail the build if total coverage is below 80%
 
 .PHONY: up
 up: ## Start the full stack with Docker Compose
-	docker compose -f deploy/docker-compose.yml up --build -d
+	docker compose -f docker-compose.yml up --build -d
 	@echo "Stack is up. Swagger UI: http://localhost:8080/swagger/"
 
 .PHONY: down
 down: ## Stop and remove all Docker Compose resources
-	docker compose -f deploy/docker-compose.yml down -v
+	docker compose -f docker-compose.yml down -v
 
 .PHONY: logs
 logs: ## Tail logs from all services
-	docker compose -f deploy/docker-compose.yml logs -f
+	docker compose -f docker-compose.yml logs -f
 
 .PHONY: smoke-test
 smoke-test: ## Quick API sanity check against the local stack
@@ -170,11 +168,12 @@ helm-template: ## Dry-run: render all Helm templates to stdout
 	helm template gpu-telemetry deploy/helm/gpu-telemetry
 
 .PHONY: helm-install
-helm-install: ## Install (or upgrade) the chart to the current kubectl context
+helm-install: helm-deps ## Install (or upgrade) the chart to the current kubectl context
 	helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
 		--namespace gpu-telemetry \
 		--create-namespace \
 		--values deploy/helm/gpu-telemetry/values.yaml \
+		--set-file streamer.csvData=data/sample_data.csv \
 		--wait \
 		--timeout 5m
 
