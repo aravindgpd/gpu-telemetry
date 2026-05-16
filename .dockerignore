@@ -1,0 +1,35 @@
+# Keep the Docker build context lean — most repo files don't need to ship to the daemon.
+
+# Build artefacts
+**/bin/
+**/dist/
+**/*.exe
+**/*.test
+**/coverage.out
+**/coverage.html
+
+# Editor / OS
+.vscode/
+.idea/
+**/.DS_Store
+**/Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed inside images)
+docs/
+README.md
+*.md
+
+# Helm + deploy artefacts
+deploy/
+
+# Compose + the Dockerfiles themselves (the daemon already has them)
+docker-compose.yml
+docker-compose.*.yml
+**/Dockerfile
+
+# Old wide-format CSV — superseded by data/sample_data.csv
+data/gpu_telemetry.csv

@@ -5,17 +5,23 @@ package telemetry;
 option go_package = "github.com/aravindgpd/gpu-telemetry/proto/telemetry";
 
 // TelemetryRecord is the serialized payload published by a Streamer and
-// deserialized by a Collector. It maps directly to one DCGM exporter CSV row
-// (long/melted format: one record per <timestamp, gpu, metric_name> sample).
+// deserialized by a Collector. It maps to one DCGM exporter CSV row in
+// long/melted format (one record per <gpu, metric_name> sample).
+//
+// Timestamp semantics per project spec: the canonical timestamp of a sample
+// is the wall-clock time at which the Streamer processes the CSV row. The
+// CSV's own timestamp column is decorative and is intentionally ignored.
+// Each loop pass through the CSV therefore produces a fresh sample with a
+// fresh timestamp, simulating a continuous live telemetry feed.
 message TelemetryRecord {
-  // ingested_unix_ns is the processing time (when the Streamer published this
-  // record), in Unix nanoseconds. Per spec, this is the canonical telemetry
-  // timestamp used for downstream ordering and retention.
+  // ingested_unix_ns is set by the Streamer at publish time, in Unix
+  // nanoseconds. Used as the canonical timestamp throughout the pipeline.
   int64  ingested_unix_ns = 1;
 
-  // sample_unix_ns is the original scrape timestamp from the DCGM exporter
-  // CSV row (the "timestamp" column), in Unix nanoseconds. Kept for late-
-  // arrival analysis and source-of-truth reconstruction.
+  // sample_unix_ns is set by the Streamer at publish time as well. Currently
+  // identical to ingested_unix_ns; kept as a separate field so future
+  // designs can distinguish "produced at" from "received at" without a
+  // proto-breaking change.
   int64  sample_unix_ns   = 2;
 
   // DCGM metric identifier, e.g. "DCGM_FI_DEV_GPU_UTIL",
