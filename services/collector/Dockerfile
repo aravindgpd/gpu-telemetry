@@ -4,7 +4,7 @@
 # The migrations/ directory is embedded into the binary at build time via
 # go:embed, so no extra volume mount is needed for SQL files.
 
-ARG GO_VERSION=1.22
+ARG GO_VERSION=1.23
 
 FROM golang:${GO_VERSION}-alpine AS builder
 

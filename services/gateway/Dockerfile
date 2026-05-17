@@ -4,7 +4,7 @@
 # Gateway has no proto dependency — only Postgres. Build context is repo root for
 # consistency with the other services.
 
-ARG GO_VERSION=1.22
+ARG GO_VERSION=1.23
 
 FROM golang:${GO_VERSION}-alpine AS builder
 

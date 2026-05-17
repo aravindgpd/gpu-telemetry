@@ -4,7 +4,7 @@
 # the service module (the go.mod replace directive points at ../../proto).
 # Build with:  docker build -f services/messagequeue/Dockerfile -t gpu-telemetry/messagequeue:dev .
 
-ARG GO_VERSION=1.22
+ARG GO_VERSION=1.23
 
 FROM golang:${GO_VERSION}-alpine AS builder
 
