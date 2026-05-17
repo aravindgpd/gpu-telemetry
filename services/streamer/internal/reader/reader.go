@@ -13,7 +13,6 @@ import (
 
 	telemetrypb "github.com/aravindgpd/gpu-telemetry/proto/telemetry"
 	"github.com/aravindgpd/gpu-telemetry/streamer/internal/coordinator"
-	"github.com/aravindgpd/gpu-telemetry/streamer/internal/publisher"
 	"go.uber.org/zap"
 )
 
@@ -37,6 +36,12 @@ const (
 	minCols       = 12
 )
 
+// Publisher is the narrow interface this package needs from the MQ publisher.
+// The concrete *publisher.Publisher satisfies it; tests use a fake.
+type Publisher interface {
+	Publish(ctx context.Context, rec *telemetrypb.TelemetryRecord, partition int32) error
+}
+
 // Reader loops over a DCGM CSV file, publishing each row it is responsible for.
 type Reader struct {
 	csvPath    string
@@ -53,7 +58,7 @@ func New(csvPath string, intervalMs int, logger *zap.Logger) *Reader {
 // Stream reads the CSV file in a continuous loop until ctx is cancelled.
 // On each complete pass the row counter resets so rows are replayed from the
 // beginning, simulating a live data feed.
-func (r *Reader) Stream(ctx context.Context, coord *coordinator.Coordinator, pub *publisher.Publisher) error {
+func (r *Reader) Stream(ctx context.Context, coord *coordinator.Coordinator, pub Publisher) error {
 	interval := time.Duration(r.intervalMs) * time.Millisecond
 	rowNum := 0
 
@@ -76,7 +81,7 @@ func (r *Reader) Stream(ctx context.Context, coord *coordinator.Coordinator, pub
 func (r *Reader) streamOnce(
 	ctx context.Context,
 	coord *coordinator.Coordinator,
-	pub *publisher.Publisher,
+	pub Publisher,
 	rowNum *int,
 	interval time.Duration,
 ) error {
