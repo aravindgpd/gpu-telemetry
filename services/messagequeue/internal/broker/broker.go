@@ -216,6 +216,13 @@ type Subscription struct {
 	assigned  []int32
 	cursors   map[int32]int64
 	sharedSub *subscriber
+
+	// skipLeave is set to true by SkipLeaveOnCleanup when the stream is
+	// terminating due to a rebalance (the same member will re-Subscribe
+	// immediately). Calling Leave in that window would briefly drop the
+	// member, flipping the group composition and triggering a fresh
+	// rebalance — a classic ping-pong storm.
+	skipLeave bool
 }
 
 // AssignedPartitions returns the partitions this subscription owns at the
@@ -274,11 +281,38 @@ func (s *Subscription) PollOnce() []DeliveredSlot {
 	return out
 }
 
-// Cleanup detaches the subscription from every partition and removes the
-// member from its group. Always safe to call; idempotent.
+// staleMemberGrace is how long a member's entry lingers in the group after
+// a rebalance-driven Subscribe exit before it gets garbage-collected. The
+// expected case is the consumer re-Subscribes within milliseconds; the grace
+// window only matters when the pod crashed mid-rebalance or is being
+// replaced by a new pod with a different consumer_id.
+const staleMemberGrace = 30 * time.Second
+
+// SkipLeaveOnCleanup arranges for the next Cleanup call to detach from
+// partitions but NOT immediately remove the member from its group. Used by
+// the Subscribe handler on the rebalance-exit path, where the same member
+// usually re-Subscribes within milliseconds — calling Leave there would
+// trigger a rebalance storm.
+//
+// To prevent stale entries from accumulating if the consumer never returns
+// (crashed pod, or replaced by a pod with a different consumer_id), Cleanup
+// schedules a delayed eviction; if the same *groupMember is still in the
+// group after staleMemberGrace, it is removed and the resulting rebalance
+// is broadcast normally.
+func (s *Subscription) SkipLeaveOnCleanup() {
+	s.skipLeave = true
+}
+
+// Cleanup detaches the subscription from every partition and (unless
+// SkipLeaveOnCleanup was called) removes the member from its group.
+// Always safe to call; idempotent.
 func (s *Subscription) Cleanup() {
 	for _, p := range s.assigned {
 		s.topic.partitions[p].removeSubscriber(s.sharedSub)
+	}
+	if s.skipLeave {
+		s.scheduleStaleEviction()
+		return
 	}
 	evicted := s.group.Leave(s.memberID)
 	for _, e := range evicted {
@@ -287,6 +321,37 @@ func (s *Subscription) Cleanup() {
 			zap.String("group", s.groupName),
 			zap.String("evicted_id", e.id))
 	}
+}
+
+// scheduleStaleEviction arms a timer that removes this Subscription's
+// *groupMember entry if no fresh Subscribe replaces it within the grace
+// window. LeaveIfSameMember's pointer check makes this a safe no-op when
+// the member has already re-Subscribed (Join replaces the pointer).
+func (s *Subscription) scheduleStaleEviction() {
+	member := s.member
+	memberID := s.memberID
+	group := s.group
+	topicName := s.topic.name
+	groupName := s.groupName
+	logger := s.broker.logger
+
+	time.AfterFunc(staleMemberGrace, func() {
+		removed, evicted := group.LeaveIfSameMember(memberID, member)
+		if !removed {
+			return // consumer re-Subscribed; nothing to do
+		}
+		logger.Info("stale group member evicted after grace timeout",
+			zap.String("topic", topicName),
+			zap.String("group", groupName),
+			zap.String("member_id", memberID),
+			zap.Duration("grace", staleMemberGrace))
+		for _, e := range evicted {
+			logger.Info("group member evicted on stale-cleanup-rebalance",
+				zap.String("topic", topicName),
+				zap.String("group", groupName),
+				zap.String("evicted_id", e.id))
+		}
+	})
 }
 
 // DeliveredSlot pairs a partition ID with the slot that was read from it.

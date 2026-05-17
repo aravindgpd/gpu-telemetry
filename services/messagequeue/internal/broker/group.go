@@ -91,7 +91,35 @@ func (g *consumerGroup) Join(memberID string) (*groupMember, []int32, []*groupMe
 func (g *consumerGroup) Leave(memberID string) []*groupMember {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.leaveLocked(memberID)
+}
 
+// LeaveIfSameMember removes memberID only if the current entry's pointer
+// equals expected — guarding against evicting a member that has already
+// re-Subscribed under the same ID (Join replaces the *groupMember pointer
+// even when the ID is unchanged).
+//
+// Used by the grace-period eviction path: after a rebalance-driven exit we
+// keep the member in the group briefly so an immediate reconnect is a no-op.
+// If the consumer never comes back (crashed pod, replaced by a pod with a
+// different ID), this is how the stale entry eventually gets cleaned up.
+//
+// Returns the (memberRemoved, otherEvicted) pair: memberRemoved is true if
+// the expected pointer matched and we removed the entry; otherEvicted lists
+// the OTHER members whose assignment changed as a result.
+func (g *consumerGroup) LeaveIfSameMember(memberID string, expected *groupMember) (bool, []*groupMember) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cur, ok := g.members[memberID]
+	if !ok || cur != expected {
+		return false, nil
+	}
+	return true, g.leaveLocked(memberID)
+}
+
+// leaveLocked is the shared body of Leave and LeaveIfSameMember. Caller must
+// hold g.mu and have already verified the member exists.
+func (g *consumerGroup) leaveLocked(memberID string) []*groupMember {
 	if _, ok := g.members[memberID]; !ok {
 		return nil
 	}

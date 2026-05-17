@@ -106,6 +106,11 @@ func (s *service) Subscribe(req *mqpb.SubscribeRequest, stream mqpb.MessageQueue
 			return nil
 
 		case <-sub.Done():
+			// Rebalance exit: the same consumer will re-Subscribe immediately,
+			// so we must NOT remove it from the group — the deferred Cleanup
+			// would otherwise flip the member count and trigger a fresh
+			// rebalance for the surviving members (ping-pong storm).
+			sub.SkipLeaveOnCleanup()
 			// Final rebalance signal so the client's existing handler ([consumer.go:97])
 			// returns from runOnce and reconnects.
 			rebalanceMsg := &mqpb.DeliveryMessage{

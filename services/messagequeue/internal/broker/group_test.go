@@ -135,6 +135,104 @@ func TestGroupLeaveUnknownMemberIsNoOp(t *testing.T) {
 	}
 }
 
+// TestGroupLeaveIfSameMemberWhenReplaced: the protected delayed-leave path
+// must NOT remove a member that has already re-Subscribed (Join replaced the
+// *groupMember pointer). This is what prevents the grace-timer from evicting
+// a healthy member that reconnected within the window.
+func TestGroupLeaveIfSameMemberWhenReplaced(t *testing.T) {
+	g := newConsumerGroup("topic", "grp", 4)
+	first, _, _ := g.Join("c0")
+	// c0 reconnects with the same ID — Join replaces the *groupMember entry.
+	second, _, _ := g.Join("c0")
+
+	removed, evicted := g.LeaveIfSameMember("c0", first)
+
+	if removed {
+		t.Errorf("LeaveIfSameMember evicted the replaced member; pointer guard failed")
+	}
+	if evicted != nil {
+		t.Errorf("expected no cascade eviction, got %v", evictedIDs(evicted))
+	}
+	// The current entry must still be the second one.
+	if g.members["c0"] != second {
+		t.Errorf("members[c0] = %p, want %p", g.members["c0"], second)
+	}
+}
+
+// TestGroupLeaveIfSameMemberWhenStill: when the same *groupMember is still
+// the live entry (consumer never reconnected), LeaveIfSameMember removes it
+// and cascades the rebalance to the survivors.
+func TestGroupLeaveIfSameMemberWhenStill(t *testing.T) {
+	g := newConsumerGroup("topic", "grp", 10)
+	c0, _, _ := g.Join("c0")
+	c1, _, _ := g.Join("c1") // c0 evicted as a side-effect
+
+	// Simulate: c0's Subscribe handler called SkipLeaveOnCleanup, so c0 is
+	// still in members map. c0's pod then crashed and never re-Subscribes.
+	// The grace timer fires:
+	removed, evicted := g.LeaveIfSameMember("c0", c0)
+
+	if !removed {
+		t.Fatal("expected LeaveIfSameMember to remove the stale member")
+	}
+	// c1's assignment expanded back to all 10 partitions → c1 evicted.
+	if len(evicted) != 1 || evicted[0] != c1 {
+		t.Errorf("expected c1 cascade-evicted, got %v", evictedIDs(evicted))
+	}
+	if _, ok := g.members["c0"]; ok {
+		t.Error("c0 still in members map after stale-member eviction")
+	}
+}
+
+// TestGroupLeaveIfSameMemberWhenAbsent: nothing to do if the member entry
+// was already removed (e.g., explicit Leave beat the grace timer).
+func TestGroupLeaveIfSameMemberWhenAbsent(t *testing.T) {
+	g := newConsumerGroup("topic", "grp", 4)
+	stub := &groupMember{id: "ghost", done: make(chan struct{})}
+	removed, evicted := g.LeaveIfSameMember("ghost", stub)
+	if removed || evicted != nil {
+		t.Errorf("LeaveIfSameMember(absent) = (%v, %v), want (false, nil)", removed, evicted)
+	}
+}
+
+// TestGroupDifferentMemberIDDoesNotEvictStale: this captures the regression
+// that motivated LeaveIfSameMember. Without the grace-timer eviction, a pod
+// rebalanced out via SkipLeaveOnCleanup that gets replaced by a NEW pod
+// with a different consumer_id would leave the original entry forever.
+// The new pod joins as an additional member, so the group ends up with
+// 3 entries (one dead, two live) and the dead one squats on its partitions.
+//
+// This test only asserts the building blocks: Join("new") with the old
+// entry still present yields 3 members, and then LeaveIfSameMember on the
+// stale one brings it back to 2.
+func TestGroupDifferentMemberIDDoesNotEvictStale(t *testing.T) {
+	g := newConsumerGroup("topic", "grp", 12)
+	c0, _, _ := g.Join("pod-old")
+	g.Join("pod-stable") // pod-old evicted
+
+	// pod-old's Cleanup ran with skipLeave; entry still present.
+	if _, ok := g.members["pod-old"]; !ok {
+		t.Fatal("test precondition: pod-old should still be in members")
+	}
+
+	// A new pod with a different consumer_id joins (Kubernetes spun up a
+	// replacement with a new pod name).
+	g.Join("pod-replacement")
+
+	if len(g.members) != 3 {
+		t.Errorf("expected 3 members during stale-window, got %d", len(g.members))
+	}
+
+	// Grace timer fires for pod-old:
+	removed, _ := g.LeaveIfSameMember("pod-old", c0)
+	if !removed {
+		t.Fatal("LeaveIfSameMember should have removed the stale pod-old entry")
+	}
+	if len(g.members) != 2 {
+		t.Errorf("expected 2 members after stale eviction, got %d", len(g.members))
+	}
+}
+
 // TestGroupAcknowledgeMonotonic: only forward-moving offsets stick.
 // Late or duplicate acks must NOT rewind the committed cursor.
 func TestGroupAcknowledgeMonotonic(t *testing.T) {
