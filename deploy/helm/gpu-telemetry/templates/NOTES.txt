@@ -38,21 +38,11 @@ Then in another terminal:
 ────────────────────────────────────────────────────────────────────────────
 About the Streamer CSV data:
 ────────────────────────────────────────────────────────────────────────────
-{{- if not .Values.streamer.csvData }}
 
-⚠  streamer.csvData is empty — the streamer pods will read an empty CSV and
-    won't publish telemetry. To install with the bundled sample data:
-
-      helm upgrade --install {{ .Release.Name }} {{ .Chart.Name }} \
-           --namespace {{ .Release.Namespace }} \
-           --set-file streamer.csvData=data/sample_data.csv
-
-    or supply your own DCGM CSV file the same way.
-{{- else }}
-
-✓  CSV data was loaded from --set-file ({{ len .Values.streamer.csvData }} bytes)
-   into the ConfigMap. Streamer pods will replay it in a loop.
-{{- end }}
+The sample DCGM CSV is baked into the streamer image at
+{{ .Values.streamer.config.csvPath }}, so pods start with no external data
+dependency. To swap in a different dataset, rebuild the streamer image with
+your CSV at that path (or mount one and override $CSV_PATH).
 
 ────────────────────────────────────────────────────────────────────────────
 Scaling:

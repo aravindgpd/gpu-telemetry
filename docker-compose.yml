@@ -37,7 +37,7 @@ services:
     build:
       context: .
       dockerfile: services/messagequeue/Dockerfile
-    image: gpu-telemetry/messagequeue:dev
+    image: aravindgpd/gpu-telemetry-messagequeue:dev
     restart: unless-stopped
     environment:
       GRPC_PORT: "9090"
@@ -54,7 +54,7 @@ services:
     build:
       context: .
       dockerfile: services/streamer/Dockerfile
-    image: gpu-telemetry/streamer:dev
+    image: aravindgpd/gpu-telemetry-streamer:dev
     restart: unless-stopped
     depends_on:
       messagequeue:
@@ -73,7 +73,7 @@ services:
     build:
       context: .
       dockerfile: services/collector/Dockerfile
-    image: gpu-telemetry/collector:dev
+    image: aravindgpd/gpu-telemetry-collector:dev
     restart: unless-stopped
     depends_on:
       postgres:
@@ -91,7 +91,7 @@ services:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
-    image: gpu-telemetry/gateway:dev
+    image: aravindgpd/gpu-telemetry-gateway:dev
     restart: unless-stopped
     depends_on:
       postgres:

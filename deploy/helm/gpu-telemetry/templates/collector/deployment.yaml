@@ -18,6 +18,8 @@ spec:
       annotations:
         {{- toYaml .Values.collector.podAnnotations | nindent 8 }}
     spec:
+      initContainers:
+        {{- include "gpu-telemetry.waitForPostgres" . | nindent 8 }}
       containers:
         - name: {{ $component }}
           image: "{{ .Values.global.imageRegistry }}{{ .Values.collector.image.repository }}:{{ .Values.collector.image.tag }}"

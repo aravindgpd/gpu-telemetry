@@ -9,8 +9,8 @@ global:
 messagequeue:
   replicaCount: 1
   image:
-    repository: gpu-telemetry/messagequeue
-    tag: latest
+    repository: aravindgpd/gpu-telemetry-messagequeue
+    tag: dev
     pullPolicy: IfNotPresent
   service:
     port: 9090
@@ -39,17 +39,15 @@ messagequeue:
 streamer:
   replicaCount: 2           # 1–10; STREAMER_TOTAL is set automatically to this value
   image:
-    repository: gpu-telemetry/streamer
-    tag: latest
+    repository: aravindgpd/gpu-telemetry-streamer
+    tag: dev
     pullPolicy: IfNotPresent
   config:
     mqTopic: gpu-telemetry
     streamIntervalMs: 100              # delay between streamed rows (ms)
-    csvPath: /data/sample_data.csv     # path inside the container; matches ConfigMap mount
-  # csvData carries the full DCGM CSV body. Supply via --set-file at install:
-  #   helm install ... --set-file streamer.csvData=data/sample_data.csv
-  # Default empty string renders an empty CSV (Streamer warns but doesn't crash).
-  csvData: ""
+    # CSV is baked into the streamer image at this path; override only if you
+    # mount a different file via an extra volume/initContainer.
+    csvPath: /data/sample_data.csv
   autoscaling:
     enabled: true
     minReplicas: 1
@@ -70,8 +68,8 @@ streamer:
 collector:
   replicaCount: 2
   image:
-    repository: gpu-telemetry/collector
-    tag: latest
+    repository: aravindgpd/gpu-telemetry-collector
+    tag: dev
     pullPolicy: IfNotPresent
   config:
     mqTopic: gpu-telemetry
@@ -96,8 +94,8 @@ collector:
 gateway:
   replicaCount: 2
   image:
-    repository: gpu-telemetry/gateway
-    tag: latest
+    repository: aravindgpd/gpu-telemetry-gateway
+    tag: dev
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -129,8 +127,30 @@ gateway:
     prometheus.io/port:   "9091"
 
 # ── PostgreSQL (Bitnami subchart) ──────────────────────────────────────────────
+# NOTE: As of Aug 2025, Bitnami moved pinned/versioned free images out of
+# docker.io/bitnami/* into docker.io/bitnamilegacy/*. The main bitnami namespace
+# now only serves "latest" tags for paid subscribers. The image.* overrides
+# below redirect to the legacy archive so the chart's pinned tags still pull.
+# See docs/HELM_INSTALL_AND_SMOKE_TEST.md §7 for context.
 postgresql:
   enabled: true
+  global:
+    security:
+      allowInsecureImages: true   # required to use non-"bitnami" repos
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+    tag: 16.4.0-debian-12-r14
+  volumePermissions:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+      tag: 12-debian-12-r33
+  metrics:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/postgres-exporter
+      tag: 0.15.0-debian-12-r14
   auth:
     database: gpu_telemetry
     username: gpu_user

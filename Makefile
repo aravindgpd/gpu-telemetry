@@ -173,7 +173,6 @@ helm-install: helm-deps ## Install (or upgrade) the chart to the current kubectl
 		--namespace gpu-telemetry \
 		--create-namespace \
 		--values deploy/helm/gpu-telemetry/values.yaml \
-		--set-file streamer.csvData=data/sample_data.csv \
 		--wait \
 		--timeout 5m
 

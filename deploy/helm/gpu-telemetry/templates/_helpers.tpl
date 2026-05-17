@@ -65,3 +65,75 @@ MQ broker address (service name:port).
 {{- define "gpu-telemetry.mqAddress" -}}
 {{- printf "%s-messagequeue:%d" (include "gpu-telemetry.fullname" .) (.Values.messagequeue.service.port | int) }}
 {{- end }}
+
+{{/*
+Resolved PostgreSQL connection coordinates — switches between the in-chart
+Bitnami subchart and externalDatabase config.
+*/}}
+{{- define "gpu-telemetry.postgres.host" -}}
+{{- if .Values.postgresql.enabled -}}
+{{- printf "%s-postgresql" .Release.Name -}}
+{{- else -}}
+{{- .Values.externalDatabase.host -}}
+{{- end -}}
+{{- end }}
+
+{{- define "gpu-telemetry.postgres.port" -}}
+{{- if .Values.postgresql.enabled -}}
+5432
+{{- else -}}
+{{- .Values.externalDatabase.port -}}
+{{- end -}}
+{{- end }}
+
+{{- define "gpu-telemetry.postgres.user" -}}
+{{- if .Values.postgresql.enabled -}}
+{{- .Values.postgresql.auth.username -}}
+{{- else -}}
+{{- .Values.externalDatabase.username -}}
+{{- end -}}
+{{- end }}
+
+{{- define "gpu-telemetry.postgres.database" -}}
+{{- if .Values.postgresql.enabled -}}
+{{- .Values.postgresql.auth.database -}}
+{{- else -}}
+{{- .Values.externalDatabase.database -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Init container that blocks pod startup until PostgreSQL accepts connections.
+Reuses the postgresql.image so the node already has it cached (no extra pull).
+Use:
+  spec:
+    initContainers:
+      {{- include "gpu-telemetry.waitForPostgres" . | nindent 8 }}
+*/}}
+{{- define "gpu-telemetry.waitForPostgres" -}}
+- name: wait-for-postgres
+  image: "{{ .Values.postgresql.image.registry }}/{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+  imagePullPolicy: IfNotPresent
+  command:
+    - /bin/sh
+    - -c
+    - |
+      set -e
+      host="{{ include "gpu-telemetry.postgres.host" . }}"
+      port="{{ include "gpu-telemetry.postgres.port" . }}"
+      user="{{ include "gpu-telemetry.postgres.user" . }}"
+      db="{{ include "gpu-telemetry.postgres.database" . }}"
+      echo "waiting for postgres at ${host}:${port} (db=${db}, user=${user})"
+      until pg_isready -h "${host}" -p "${port}" -U "${user}" -d "${db}" -t 2; do
+        echo "  postgres not ready, retrying in 2s..."
+        sleep 2
+      done
+      echo "postgres is ready"
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+{{- end }}

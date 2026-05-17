@@ -40,13 +40,7 @@ spec:
               value: {{ .Values.streamer.config.csvPath | quote }}
             - name: STREAM_INTERVAL_MS
               value: {{ .Values.streamer.config.streamIntervalMs | quote }}
-          volumeMounts:
-            - name: csv-data
-              mountPath: /data
-              readOnly: true
+          # CSV is baked into the streamer image at /data/sample_data.csv
+          # (see services/streamer/Dockerfile). No ConfigMap or PV needed.
           resources:
             {{- toYaml .Values.streamer.resources | nindent 12 }}
-      volumes:
-        - name: csv-data
-          configMap:
-            name: {{ include "gpu-telemetry.fullname" . }}-csv-data
