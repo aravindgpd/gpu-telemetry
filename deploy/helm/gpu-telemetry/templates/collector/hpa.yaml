@@ -1,4 +1,4 @@
-{{- if .Values.collector.autoscaling.enabled }}
+{{- if and .Values.collector.enabled .Values.collector.autoscaling.enabled }}
 {{- $component := "collector" }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

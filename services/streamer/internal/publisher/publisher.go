@@ -25,7 +25,13 @@ type Publisher struct {
 
 // New dials the MQ broker, ensures the topic exists, opens a Publish stream,
 // and starts a background goroutine that drains acknowledgement responses.
-func New(cfg *config.Config, logger *zap.Logger) (*Publisher, error) {
+//
+// Resilient to cold-start ordering: if the MQ broker isn't reachable yet, the
+// CreateTopic and Publish-stream-open calls retry with exponential backoff
+// until they succeed or ctx is cancelled. This lets you start the Streamer
+// before the MQ broker in any deployment topology — including different
+// machines on different network paths — without crashlooping.
+func New(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*Publisher, error) {
 	conn, err := grpc.NewClient(cfg.MQAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("grpc.NewClient %s: %w", cfg.MQAddress, err)
@@ -33,25 +39,47 @@ func New(cfg *config.Config, logger *zap.Logger) (*Publisher, error) {
 
 	client := mqpb.NewMessageQueueClient(conn)
 
-	// Best-effort topic creation: a concurrent Streamer pod may win the race.
-	resp, err := client.CreateTopic(context.Background(), &mqpb.CreateTopicRequest{
-		Topic:      cfg.Topic,
-		Partitions: int32(cfg.StreamerTotal),
+	// Wait for the broker to come up. CreateTopic is the first real RPC and
+	// will fail until the broker is listening; the retry loop is what gives
+	// us "start in any order" semantics.
+	logger.Info("connecting to MQ broker",
+		zap.String("address", cfg.MQAddress),
+		zap.String("topic", cfg.Topic))
+
+	createErr := retryWithBackoff(ctx, logger, "CreateTopic", func(ctx context.Context) error {
+		resp, err := client.CreateTopic(ctx, &mqpb.CreateTopicRequest{
+			Topic:      cfg.Topic,
+			Partitions: int32(cfg.StreamerTotal),
+		})
+		if err != nil {
+			return err
+		}
+		if resp.Error != "" {
+			// Broker is reachable; topic already exists (concurrent Streamer
+			// pod won the race). Not a retryable error.
+			logger.Info("topic already exists, continuing",
+				zap.String("topic", cfg.Topic),
+				zap.String("broker_note", resp.Error))
+		}
+		return nil
 	})
-	if err != nil {
+	if createErr != nil {
 		conn.Close()
-		return nil, fmt.Errorf("CreateTopic %q: %w", cfg.Topic, err)
-	}
-	if resp.Error != "" {
-		logger.Warn("CreateTopic: topic may already exist",
-			zap.String("topic", cfg.Topic),
-			zap.String("broker_error", resp.Error))
+		return nil, fmt.Errorf("CreateTopic %q: %w", cfg.Topic, createErr)
 	}
 
-	stream, err := client.Publish(context.Background())
-	if err != nil {
+	var stream mqpb.MessageQueue_PublishClient
+	openErr := retryWithBackoff(ctx, logger, "open Publish stream", func(ctx context.Context) error {
+		s, err := client.Publish(ctx)
+		if err != nil {
+			return err
+		}
+		stream = s
+		return nil
+	})
+	if openErr != nil {
 		conn.Close()
-		return nil, fmt.Errorf("open Publish stream: %w", err)
+		return nil, fmt.Errorf("open Publish stream: %w", openErr)
 	}
 
 	p := &Publisher{cfg: cfg, logger: logger, conn: conn, stream: stream}

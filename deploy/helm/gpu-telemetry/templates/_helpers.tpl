@@ -60,10 +60,21 @@ otherwise uses externalDatabase values.
 {{- end }}
 
 {{/*
-MQ broker address (service name:port).
+MQ broker address resolution.
+  1. If messagequeue.externalAddress is set, use it verbatim — used when the
+     broker lives in a different cluster.
+  2. Else if messagequeue.enabled is true, derive the in-cluster service name.
+  3. Else fail — there's no broker and no external address, so streamer /
+     collector would have nothing to talk to.
 */}}
 {{- define "gpu-telemetry.mqAddress" -}}
+{{- if .Values.messagequeue.externalAddress }}
+{{- .Values.messagequeue.externalAddress }}
+{{- else if .Values.messagequeue.enabled }}
 {{- printf "%s-messagequeue:%d" (include "gpu-telemetry.fullname" .) (.Values.messagequeue.service.port | int) }}
+{{- else }}
+{{- fail "messagequeue is disabled and no messagequeue.externalAddress is set — streamer/collector would have no broker to talk to" }}
+{{- end }}
 {{- end }}
 
 {{/*

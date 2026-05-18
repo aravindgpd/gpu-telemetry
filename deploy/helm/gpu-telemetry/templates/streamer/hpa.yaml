@@ -1,4 +1,4 @@
-{{- if .Values.streamer.autoscaling.enabled }}
+{{- if and .Values.streamer.enabled .Values.streamer.autoscaling.enabled }}
 {{- $component := "streamer" }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

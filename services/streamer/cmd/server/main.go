@@ -32,15 +32,12 @@ func main() {
 
 	coord := coordinator.New(cfg.StreamerIndex, cfg.StreamerTotal)
 
-	pub, err := publisher.New(cfg, logger)
-	if err != nil {
-		logger.Fatal("failed to create publisher", zap.Error(err))
-	}
-	defer pub.Close()
-
 	csvReader := reader.New(cfg.CSVPath, cfg.StreamIntervalMs, logger)
 
-	// Observability sidecar: /healthz, /readyz, /metrics on a dedicated port.
+	// Observability sidecar starts FIRST so /healthz answers immediately —
+	// even while we wait for the MQ broker to come up. This means a healthy
+	// "I'm alive but my dependency isn't ready" liveness probe works in any
+	// deployment topology (different machines, restarts in any order).
 	obsServer := obs.Start(cfg.MetricsPort, logger, func() error { return nil })
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -55,6 +52,18 @@ func main() {
 		zap.String("csv_path", cfg.CSVPath),
 		zap.String("mq_address", cfg.MQAddress),
 	)
+
+	// Wait (with backoff) for the MQ broker to be reachable. publisher.New
+	// retries internally until ctx is cancelled, so this returns nil quickly
+	// when the broker is already up and politely waits otherwise.
+	pub, err := publisher.New(ctx, cfg, logger)
+	if err != nil {
+		// Only reached if ctx is cancelled before the broker came up
+		// (i.e. SIGTERM during the wait). Treat as a clean shutdown.
+		logger.Info("streamer shutting down before publisher was ready", zap.Error(err))
+		return
+	}
+	defer pub.Close()
 
 	if err := csvReader.Stream(ctx, coord, pub); err != nil {
 		logger.Error("streamer exited with error", zap.Error(err))

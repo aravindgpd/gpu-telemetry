@@ -17,14 +17,23 @@ import (
 
 // fakeRepo is a hand-rolled mock for store.Repository. Test cases set the
 // fields they care about; unset method behaviours fall back to safe defaults.
+// "lastX" fields record the most recent call's args so tests can assert that
+// the handler-to-store contract is honoured.
 type fakeRepo struct {
 	gpus       []store.GPU
 	gpusErr    error
 	telemetry  []store.TelemetryRecord
 	telErr     error
+	queryErr   error
+	models     []store.ModelSummary
+	modelsErr  error
 	pingErr    error
+
+	// Recorded args from the last call (any method).
 	lastUUID   string
 	lastMetric string
+	lastModel  string
+	lastHost   string
 	lastStart  *time.Time
 	lastEnd    *time.Time
 	lastLimit  int
@@ -32,6 +41,14 @@ type fakeRepo struct {
 }
 
 func (r *fakeRepo) ListGPUs(ctx context.Context) ([]store.GPU, error) {
+	return r.gpus, r.gpusErr
+}
+
+func (r *fakeRepo) QueryGPUs(ctx context.Context, f store.GPUFilter) ([]store.GPU, error) {
+	r.lastModel = f.ModelName
+	r.lastHost = f.Hostname
+	r.lastLimit = f.Limit
+	r.lastOffset = f.Offset
 	return r.gpus, r.gpusErr
 }
 
@@ -48,6 +65,24 @@ func (r *fakeRepo) GetTelemetry(
 	r.lastLimit = limit
 	r.lastOffset = offset
 	return r.telemetry, r.telErr
+}
+
+func (r *fakeRepo) QueryTelemetry(ctx context.Context, f store.TelemetryFilter) ([]store.TelemetryRecord, error) {
+	r.lastUUID = f.UUID
+	r.lastMetric = f.MetricName
+	r.lastModel = f.ModelName
+	r.lastStart = f.StartTime
+	r.lastEnd = f.EndTime
+	r.lastLimit = f.Limit
+	r.lastOffset = f.Offset
+	if r.queryErr != nil {
+		return nil, r.queryErr
+	}
+	return r.telemetry, nil
+}
+
+func (r *fakeRepo) ListModels(ctx context.Context) ([]store.ModelSummary, error) {
+	return r.models, r.modelsErr
 }
 
 func (r *fakeRepo) Ping(ctx context.Context) error { return r.pingErr }
@@ -107,6 +142,206 @@ func TestListGPUs_DBError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+}
+
+// TestListGPUs_Filters: every supported filter is threaded through to the
+// repository correctly.
+func TestListGPUs_Filters(t *testing.T) {
+	repo := &fakeRepo{}
+	srv := newTestServer(t, repo)
+
+	url := srv.URL + "/api/v1/gpus?model_name=NVIDIA+H100+80GB+HBM3&hostname=host-1&limit=25&offset=50"
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if repo.lastModel != "NVIDIA H100 80GB HBM3" {
+		t.Errorf("lastModel = %q", repo.lastModel)
+	}
+	if repo.lastHost != "host-1" {
+		t.Errorf("lastHost = %q", repo.lastHost)
+	}
+	if repo.lastLimit != 25 || repo.lastOffset != 50 {
+		t.Errorf("limit=%d offset=%d", repo.lastLimit, repo.lastOffset)
+	}
+}
+
+// TestListGPUs_DefaultPagination: no params → default limit + offset.
+func TestListGPUs_DefaultPagination(t *testing.T) {
+	repo := &fakeRepo{}
+	srv := newTestServer(t, repo)
+	resp, _ := http.Get(srv.URL + "/api/v1/gpus")
+	defer resp.Body.Close()
+	if repo.lastLimit != 100 {
+		t.Errorf("default limit = %d, want 100", repo.lastLimit)
+	}
+}
+
+// TestListGPUs_BadLimit: malformed limit yields 400.
+func TestListGPUs_BadLimit(t *testing.T) {
+	srv := newTestServer(t, &fakeRepo{})
+	resp, _ := http.Get(srv.URL + "/api/v1/gpus?limit=abc")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// ─── /telemetry (cross-GPU query) ──────────────────────────────────────────────
+
+// TestQueryTelemetry_AllFilters: model_name + metric_name + uuid + time bounds
+// all reach the repository.
+func TestQueryTelemetry_AllFilters(t *testing.T) {
+	repo := &fakeRepo{
+		telemetry: []store.TelemetryRecord{
+			{ID: 1, UUID: "GPU-aaa", MetricName: "DCGM_FI_DEV_GPU_UTIL", Value: 42},
+		},
+	}
+	srv := newTestServer(t, repo)
+
+	url := srv.URL + "/api/v1/telemetry" +
+		"?metric_name=DCGM_FI_DEV_GPU_UTIL" +
+		"&model_name=NVIDIA+H100+80GB+HBM3" +
+		"&uuid=GPU-aaa" +
+		"&start_time=2025-07-18T20:42:30Z" +
+		"&end_time=2025-07-18T20:42:50Z" +
+		"&limit=200&offset=20"
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if repo.lastMetric != "DCGM_FI_DEV_GPU_UTIL" {
+		t.Errorf("lastMetric = %q", repo.lastMetric)
+	}
+	if repo.lastModel != "NVIDIA H100 80GB HBM3" {
+		t.Errorf("lastModel = %q", repo.lastModel)
+	}
+	if repo.lastUUID != "GPU-aaa" {
+		t.Errorf("lastUUID = %q", repo.lastUUID)
+	}
+	if repo.lastStart == nil || repo.lastEnd == nil {
+		t.Errorf("expected both start/end to be parsed")
+	}
+	if repo.lastLimit != 200 || repo.lastOffset != 20 {
+		t.Errorf("limit=%d offset=%d", repo.lastLimit, repo.lastOffset)
+	}
+}
+
+// TestQueryTelemetry_NoFilters: bare /telemetry succeeds with defaults.
+func TestQueryTelemetry_NoFilters(t *testing.T) {
+	repo := &fakeRepo{}
+	srv := newTestServer(t, repo)
+
+	resp, err := http.Get(srv.URL + "/api/v1/telemetry")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if repo.lastLimit != 100 {
+		t.Errorf("default limit = %d, want 100", repo.lastLimit)
+	}
+}
+
+// TestQueryTelemetry_BadStartTime: malformed RFC3339 yields 400.
+func TestQueryTelemetry_BadStartTime(t *testing.T) {
+	srv := newTestServer(t, &fakeRepo{})
+	resp, _ := http.Get(srv.URL + "/api/v1/telemetry?start_time=last-thursday")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestQueryTelemetry_LimitCapped: requests above MaxLimit get clamped.
+func TestQueryTelemetry_LimitCapped(t *testing.T) {
+	repo := &fakeRepo{}
+	srv := newTestServer(t, repo)
+	resp, _ := http.Get(srv.URL + "/api/v1/telemetry?limit=99999")
+	defer resp.Body.Close()
+	if repo.lastLimit != 1000 {
+		t.Errorf("clamped limit = %d, want 1000", repo.lastLimit)
+	}
+}
+
+// TestQueryTelemetry_DBError surfaces 500 from the repository.
+func TestQueryTelemetry_DBError(t *testing.T) {
+	srv := newTestServer(t, &fakeRepo{queryErr: errors.New("db down")})
+	resp, _ := http.Get(srv.URL + "/api/v1/telemetry")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+}
+
+// TestQueryTelemetry_ModelNameShorthand: user-friendly substring filtering.
+// `?model_name=h100` should pass that short string to the repo verbatim — the
+// repository layer is what wraps it in '%' wildcards for ILIKE. The handler
+// MUST NOT mangle the value (e.g. lowercase it, or pre-wrap '%').
+func TestQueryTelemetry_ModelNameShorthand(t *testing.T) {
+	repo := &fakeRepo{}
+	srv := newTestServer(t, repo)
+
+	resp, _ := http.Get(srv.URL + "/api/v1/telemetry?model_name=h100")
+	defer resp.Body.Close()
+
+	if repo.lastModel != "h100" {
+		t.Errorf("handler should forward model_name verbatim to the store; got %q, want %q",
+			repo.lastModel, "h100")
+	}
+}
+
+// ─── /models (discovery) ──────────────────────────────────────────────────────
+
+// TestListModels_Success returns the seeded models as JSON.
+func TestListModels_Success(t *testing.T) {
+	repo := &fakeRepo{
+		models: []store.ModelSummary{
+			{ModelName: "NVIDIA H100 80GB HBM3", GPUCount: 12},
+			{ModelName: "NVIDIA A100 40GB", GPUCount: 4},
+		},
+	}
+	srv := newTestServer(t, repo)
+
+	resp, err := http.Get(srv.URL + "/api/v1/models")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var got []store.ModelSummary
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 2 || got[0].ModelName != "NVIDIA H100 80GB HBM3" || got[0].GPUCount != 12 {
+		t.Errorf("body = %+v", got)
+	}
+}
+
+// TestListModels_DBError: repo error → 500.
+func TestListModels_DBError(t *testing.T) {
+	srv := newTestServer(t, &fakeRepo{modelsErr: errors.New("db down")})
+	resp, _ := http.Get(srv.URL + "/api/v1/models")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", resp.StatusCode)

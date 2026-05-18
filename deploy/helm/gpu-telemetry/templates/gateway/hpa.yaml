@@ -1,4 +1,4 @@
-{{- if .Values.gateway.autoscaling.enabled }}
+{{- if and .Values.gateway.enabled .Values.gateway.autoscaling.enabled }}
 {{- $component := "gateway" }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

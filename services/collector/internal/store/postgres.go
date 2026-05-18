@@ -14,15 +14,24 @@ type postgresRepo struct {
 }
 
 // NewPostgres creates a PostgreSQL-backed Repository for the Collector.
+//
+// Resilient to cold-start ordering: pgxpool.New itself is non-blocking, so we
+// then loop on pool.Ping with exponential backoff until the database becomes
+// reachable or ctx is cancelled. This lets the Collector start in any order
+// relative to Postgres — including on a different machine over a network that
+// hasn't converged yet.
 func NewPostgres(ctx context.Context, dsn string, logger *zap.Logger) (Repository, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pgxpool.New: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
+
+	logger.Info("connecting to PostgreSQL")
+	if err := retryWithBackoff(ctx, logger, "postgres.Ping", pool.Ping); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("database ping failed: %w", err)
+		return nil, fmt.Errorf("database ping (gave up): %w", err)
 	}
+
 	return &postgresRepo{pool: pool, logger: logger}, nil
 }
 

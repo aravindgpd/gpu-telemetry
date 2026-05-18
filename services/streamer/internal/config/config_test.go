@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestLoadDefaults: with no env vars set, fields fall back to documented defaults.
 func TestLoadDefaults(t *testing.T) {
@@ -30,6 +33,24 @@ func TestLoadDefaults(t *testing.T) {
 	for _, c := range checks {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestLoadIndexGteTotalGivesHelpfulHint: when an ordinal is out of range, the
+// error must mention 'helm upgrade' so the operator understands the root cause
+// is a stale STREAMER_TOTAL from `kubectl scale` (vs. a real misconfig).
+func TestLoadIndexGteTotalGivesHelpfulHint(t *testing.T) {
+	t.Setenv("STREAMER_INDEX", "2")
+	t.Setenv("STREAMER_TOTAL", "2")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load should reject INDEX>=TOTAL")
+	}
+	msg := err.Error()
+	for _, want := range []string{"STREAMER_INDEX", "STREAMER_TOTAL", "helm upgrade", "kubectl scale"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message %q missing diagnostic hint %q", msg, want)
 		}
 	}
 }

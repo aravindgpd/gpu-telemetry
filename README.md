@@ -42,6 +42,8 @@ docker compose up --build
 # (in another terminal)
 curl http://localhost:8080/api/v1/gpus
 curl 'http://localhost:8080/api/v1/gpus/GPU-5fd4f087-86f3-7a43-b711-4771313afc50/telemetry?limit=5'
+# Or open the interactive Swagger UI:
+#   http://localhost:8080/swagger/index.html
 docker compose down -v
 ```
 
@@ -120,6 +122,104 @@ WAL writes happen **before** the in-memory ring buffer update — durability fir
 ### Rebalance protocol
 
 "Stable rebalance" (described above). Detailed walkthrough in [docs/SYSTEM_WALKTHROUGH.md §4.3](docs/SYSTEM_WALKTHROUGH.md). Notable safety net: when a Subscribe handler exits due to a rebalance, the broker keeps the member entry around for a 30-second grace window before garbage-collecting it ([broker.go:289](services/messagequeue/internal/broker/broker.go#L289)). This prevents brief reconnects from triggering cascading rebalances.
+
+### Multi-cluster topology (each service on its own cluster)
+
+Every component has an `enabled: true/false` flag in [values.yaml](deploy/helm/gpu-telemetry/values.yaml). The chart can render any subset. Cross-cluster wiring uses three overrides:
+
+- **`messagequeue.externalAddress`** — `host:port` of an MQ broker living in a different cluster. Wins over the in-cluster service name in the `mqAddress` helper.
+- **`messagequeue.service.type=LoadBalancer` (or `NodePort`)** — provisions a second `*-external` Service alongside the headless one, so other clusters can reach the broker.
+- **`postgresql.enabled=false` + `externalDatabase.*`** — Collector + Gateway point at a Postgres in a different cluster (or a managed RDS-style DB).
+
+Four example values files in [deploy/helm/gpu-telemetry/examples/](deploy/helm/gpu-telemetry/examples/) cover the four canonical topologies: MQ-only, streamer-only, collector-only, gateway-only. Pick one per cluster.
+
+The full procedure (LoadBalancer setup, cross-cluster routing, sanity checks, limitations) is in **[docs/MULTI_CLUSTER.md](docs/MULTI_CLUSTER.md)**.
+
+#### Configuring an external Message Queue endpoint
+
+This is the most common cross-cluster case: the broker lives in Cluster A; streamers and collectors live in Cluster B. Here's exactly what happens when you set `messagequeue.externalAddress`.
+
+**1. Expose the broker (Cluster A) externally.**  Default service type is `ClusterIP` (headless), which is only reachable inside the cluster. Switch it via values or `--set`:
+
+```bash
+# Cluster A — install just the broker, exposed via LoadBalancer
+helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
+    --namespace gpu-telemetry --create-namespace \
+    --values deploy/helm/gpu-telemetry/examples/messagequeue-only.values.yaml
+# The example file sets messagequeue.service.type=LoadBalancer, which renders
+# a second Service called <release>-messagequeue-external.
+
+# Discover the external IP / DNS name:
+kubectl --namespace gpu-telemetry get svc gpu-telemetry-messagequeue-external
+#   EXTERNAL-IP   PORT(S)
+#   34.120.20.45  9090:32341/TCP
+```
+
+Save `34.120.20.45:9090` (or your DNS name) — that's the address streamers and collectors in other clusters will dial.
+
+**2. Tell the streamer/collector cluster to use it.**  In Cluster B, install the streamer (or collector) and supply the external address:
+
+```bash
+# Cluster B — streamers pointing at the Cluster A broker
+helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
+    --namespace gpu-telemetry --create-namespace \
+    --values deploy/helm/gpu-telemetry/examples/streamer-only.values.yaml \
+    --set messagequeue.externalAddress=34.120.20.45:9090
+```
+
+The example file already has `messagequeue.enabled: false` and `streamer.enabled: true`, so the chart only renders streamer resources.
+
+**3. How the value reaches the pod.**  A single Helm helper resolves the address, and both streamer and collector templates pull from it:
+
+```
+values.yaml                  _helpers.tpl                 statefulset/deployment       pod env var               Go code
+  messagequeue.        →  {{- define mqAddress }}    →  env:                       →  MQ_ADDRESS=         →  cfg.MQAddress
+    externalAddress         picks external OR            - name: MQ_ADDRESS              "34.120.20.45:9090"      ↓
+                            in-cluster DNS                 value: {{ helper }}                                   grpc.NewClient(...)
+```
+
+So one knob in values.yaml flows into the `MQ_ADDRESS` env var that both [streamer/statefulset.yaml:28-29](deploy/helm/gpu-telemetry/templates/streamer/statefulset.yaml#L28) and [collector/deployment.yaml:30-31](deploy/helm/gpu-telemetry/templates/collector/deployment.yaml#L30) inject. The streamer's [config.go:24](services/streamer/internal/config/config.go#L24) and collector's [config.go:23](services/collector/internal/config/config.go#L23) read `MQ_ADDRESS`, and both pass it to `grpc.NewClient(cfg.MQAddress, ...)`.
+
+**4. Verify the wiring worked.**  After install, check the actual env var that ended up in the running pod:
+
+```bash
+kubectl --namespace gpu-telemetry exec gpu-telemetry-streamer-0 -- env | grep MQ_ADDRESS
+# MQ_ADDRESS=34.120.20.45:9090
+
+# Logs should show the streamer connecting (with retry on slow networks):
+kubectl --namespace gpu-telemetry logs gpu-telemetry-streamer-0 | grep -E "MQ|broker"
+# {"level":"info","msg":"connecting to MQ broker","address":"34.120.20.45:9090","topic":"gpu-telemetry"}
+# {"level":"info","msg":"dependency reachable","op":"CreateTopic","attempts":1}
+```
+
+If the streamer is stuck in `waiting for dependency op=CreateTopic` retries, the cross-cluster network path isn't open. Test connectivity directly:
+
+```bash
+kubectl --namespace gpu-telemetry exec gpu-telemetry-streamer-0 -- nc -zv 34.120.20.45 9090
+```
+
+**5. Why only `messagequeue.externalAddress` and not separate `streamer.externalMQAddress` / `collector.externalMQAddress`?**  Both consumers of the broker must agree on the same endpoint, so one knob feeds both via the shared `mqAddress` helper — there's no way to point them at different places by accident. The streamer and collector themselves are pure clients (nothing dials *into* them), so they don't have their own `externalAddress` fields.
+
+**Default behaviour (`externalAddress` empty):** the helper falls back to the in-cluster DNS name `gpu-telemetry-messagequeue:9090`. The single-cluster install in §[Quick start](#quick-start-local) is exactly that case.
+
+### Startup-order resilience (any pod, any machine, any order)
+
+Each of the four services can come up **independently of its dependencies** and waits politely instead of crashlooping. This matters when:
+
+- The components run on different machines (network may not have converged at startup)
+- You're testing one service in isolation (e.g. bring up the Collector before MQ exists)
+- Pods restart in arbitrary order after a node failure
+
+| Service | Hard dependency | Strategy |
+|---|---|---|
+| **MQ broker** | none | Always starts standalone |
+| **Streamer** | MQ broker | `publisher.New(ctx, ...)` wraps the initial `CreateTopic` + `Publish`-stream open in [exponential backoff](services/streamer/internal/publisher/retry.go) (200 ms → 10 s cap). Returns only when MQ is reachable or ctx is cancelled. The `obs` server (`/healthz`, `/readyz`, `/metrics`) starts FIRST so liveness probes answer immediately during the wait. |
+| **Collector** | Postgres + MQ | Postgres: `pool.Ping` wrapped in the same retry loop ([retry.go](services/collector/internal/store/retry.go)). MQ: `consumer.Run` already had reconnect-on-Subscribe-error built in ([consumer.go:71-83](services/collector/internal/consumer/consumer.go#L71)). |
+| **Gateway** | Postgres | Same retry pattern as the Collector. `obs` server starts first; once Postgres is reachable, full HTTP server comes up. |
+
+Logs make the wait visible — every retry warns with `op`, `attempt`, `next_retry_in`, and the underlying error. When the dependency comes up, a single info log records `attempts: N`. Operators see exactly which dependency is missing.
+
+The retry helpers are cancellable: SIGTERM during the wait exits cleanly via `ctx.Done()` rather than blocking shutdown.
 
 ---
 
@@ -251,9 +351,23 @@ curl "http://localhost:8080/api/v1/gpus/GPU-5fd4f087-86f3-7a43-b711-4771313afc50
 # 4. Filter by time window (ISO 8601 / RFC 3339)
 curl "http://localhost:8080/api/v1/gpus/GPU-5fd4f087-86f3-7a43-b711-4771313afc50/telemetry?start_time=2026-05-17T12:00:00Z&end_time=2026-05-17T12:05:00Z"
 
-# 5. Liveness / readiness
+# 5. Discover what GPU models exist — no need to guess the exact string
+curl http://localhost:8080/api/v1/models
+# [{"model_name":"NVIDIA H100 80GB HBM3","gpu_count":12}, ...]
+
+# 6. Cross-GPU search by metric — model_name does case-insensitive substring match,
+#    so "h100" works instead of the full URL-encoded "NVIDIA+H100+80GB+HBM3"
+curl "http://localhost:8080/api/v1/telemetry?metric_name=DCGM_FI_DEV_GPU_UTIL&model_name=h100&limit=100"
+
+# 7. Filter GPU listing by model (substring also works on hostname)
+curl "http://localhost:8080/api/v1/gpus?model_name=h100&hostname=dgx"
+
+# 8. Liveness / readiness
 curl http://localhost:8080/healthz   # always 200
 curl http://localhost:8080/readyz    # 200 if DB is reachable, 503 otherwise
+
+# 9. Or skip curl entirely — interactive UI with "Try it out" for every endpoint:
+#    Open http://localhost:8080/swagger/index.html in a browser
 ```
 
 To verify scaling, edit `docker-compose.yml` and bump `streamer` to 2 replicas, or scale collectors via `docker compose up --scale collector=3`. The MQ broker handles partition rebalancing transparently.
@@ -262,14 +376,61 @@ To verify scaling, edit `docker-compose.yml` and bump `streamer` to 2 replicas, 
 
 ## API reference
 
-OpenAPI 2.0 spec at [api/swagger.yaml](api/swagger.yaml). Regenerate with `make openapi`.
+### Interactive Swagger UI
+
+The gateway serves a live Swagger UI you can use to explore and try every endpoint without writing curl by hand:
+
+| URL | What it serves |
+|---|---|
+| `http://localhost:8080/swagger/index.html` | Interactive API explorer (Try-it-out buttons) |
+| `http://localhost:8080/swagger/doc.json` | Raw OpenAPI 2.0 spec (JSON) |
+| `http://localhost:8080/swagger` | Convenience redirect to `/swagger/index.html` |
+
+For Kubernetes deployments, port-forward the gateway first:
+
+```powershell
+kubectl --namespace gpu-telemetry port-forward svc/gpu-telemetry-gateway 8080:8080
+# Then browse http://localhost:8080/swagger/index.html
+```
+
+When `gateway.ingress.enabled=true`, Swagger is also reachable at `http(s)://<your-host>/swagger/index.html`.
+
+### Static spec
+
+The OpenAPI spec is also checked into the repo at [api/swagger.yaml](api/swagger.yaml) and [api/swagger.json](api/swagger.json). Regenerate with `make openapi` whenever you change handler annotations.
+
+### Endpoint list
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/gpus` | List all GPUs with telemetry |
+| `GET` | `/api/v1/gpus` | List GPUs (with optional model/host filters + pagination) |
 | `GET` | `/api/v1/gpus/{id}/telemetry` | Samples for one GPU |
+| `GET` | `/api/v1/telemetry` | Cross-GPU telemetry search (filter by metric/model/uuid/time) |
+| `GET` | `/api/v1/models` | Discover distinct GPU model names + GPU counts |
 | `GET` | `/healthz` | Liveness probe (always 200) |
 | `GET` | `/readyz` | Readiness probe (200 / 503 based on DB ping) |
+| `GET` | `/swagger/*` | Interactive API explorer + raw spec |
+
+### Friendly filtering: `model_name` and `hostname` use case-insensitive substring match
+
+The `model_name` and `hostname` filters on `/gpus` and `/telemetry` perform `ILIKE %X%` matching, so you don't have to URL-encode long model strings:
+
+| What you want | What you can type | What also works (exact) |
+|---|---|---|
+| All H100s | `?model_name=h100` | `?model_name=NVIDIA+H100+80GB+HBM3` |
+| All A100 80GB | `?model_name=a100` | `?model_name=NVIDIA+A100+80GB` |
+| All hosts on the dgx1 rack | `?hostname=dgx1` | `?hostname=mtv5-dgx1-hgpu-031` |
+
+If you're not sure what model strings exist, hit `GET /api/v1/models` first.
+
+### `GET /api/v1/gpus` query parameters
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `model_name` | string | (any) | Case-insensitive substring match — `h100` matches `NVIDIA H100 80GB HBM3` |
+| `hostname`   | string | (any) | Case-insensitive substring match — `dgx1` matches `mtv5-dgx1-hgpu-031` |
+| `limit`      | int    | 100   | Capped at 1000 |
+| `offset`     | int    | 0     | Page offset |
 
 ### `GET /api/v1/gpus/{id}/telemetry` query parameters
 
@@ -280,6 +441,28 @@ OpenAPI 2.0 spec at [api/swagger.yaml](api/swagger.yaml). Regenerate with `make 
 | `end_time` | RFC 3339 | (no upper bound) | Inclusive upper bound on `sample_at` |
 | `limit` | int | 100 | Capped at 1000 |
 | `offset` | int | 0 | Page offset |
+
+### `GET /api/v1/telemetry` query parameters
+
+Cross-GPU variant — all filters optional, combine freely. Returns samples ordered by `sample_at` ASC.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `metric_name` | string | (any) | e.g. `DCGM_FI_DEV_POWER_USAGE` |
+| `model_name`  | string | (any) | GPU model — case-insensitive substring (uses ILIKE; JOINs `gpus`). `h100` is enough. |
+| `uuid`        | string | (any) | Filter to one specific GPU |
+| `start_time`  | RFC 3339 | (no lower bound) | Inclusive lower bound on `sample_at` |
+| `end_time`    | RFC 3339 | (no upper bound) | Inclusive upper bound on `sample_at` |
+| `limit`       | int    | 100 | Capped at 1000 |
+| `offset`      | int    | 0   | Page offset |
+
+Example questions this endpoint answers in one call:
+
+| Question | Query |
+|---|---|
+| "GPU_UTIL across every H100 in the last 5 min" | `?metric_name=DCGM_FI_DEV_GPU_UTIL&model_name=NVIDIA+H100+80GB+HBM3&start_time=...` |
+| "All metrics from host mtv5-dgx1-hgpu-031" | `?` *(then filter client-side using gpus index)* |
+| "Power draw history for one specific GPU" | `?uuid=GPU-5fd4...&metric_name=DCGM_FI_DEV_POWER_USAGE` |
 
 ---
 

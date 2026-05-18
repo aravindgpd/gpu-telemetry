@@ -1,3 +1,4 @@
+{{- if .Values.messagequeue.enabled }}
 {{- $component := "messagequeue" }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -78,3 +79,4 @@ spec:
           requests:
             storage: {{ .Values.messagequeue.persistence.size }}
   {{- end }}
+{{- end }}

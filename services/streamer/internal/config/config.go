@@ -37,7 +37,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("STREAMER_TOTAL must be >= 1, got %d", cfg.StreamerTotal)
 	}
 	if cfg.StreamerIndex >= cfg.StreamerTotal {
-		return nil, fmt.Errorf("STREAMER_INDEX (%d) must be < STREAMER_TOTAL (%d)", cfg.StreamerIndex, cfg.StreamerTotal)
+		// This is almost always caused by scaling the StatefulSet via
+		// `kubectl scale` instead of `helm upgrade`. `kubectl scale` adds
+		// new pods (so STREAMER_INDEX gets values >= old replica count)
+		// but does NOT re-render the pod template, so STREAMER_TOTAL stays
+		// at the old value. Always scale via Helm:
+		//   helm upgrade <release> <chart> --reuse-values --set streamer.replicaCount=N
+		return nil, fmt.Errorf(
+			"STREAMER_INDEX (%d) must be < STREAMER_TOTAL (%d); "+
+				"this usually means the StatefulSet was scaled via 'kubectl scale' "+
+				"(which leaves STREAMER_TOTAL stale). Rerun with "+
+				"'helm upgrade --reuse-values --set streamer.replicaCount=%d' so the "+
+				"pod template is re-rendered with the new fleet size.",
+			cfg.StreamerIndex, cfg.StreamerTotal, cfg.StreamerIndex+1)
 	}
 
 	return cfg, nil

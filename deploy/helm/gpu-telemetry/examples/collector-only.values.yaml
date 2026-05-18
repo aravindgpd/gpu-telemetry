@@ -1,0 +1,43 @@
+# Cluster Collector — runs only collector pods + Postgres. Points at an
+# external MQ broker; can also point at an external Postgres if you prefer
+# (set postgresql.enabled=false and fill in externalDatabase).
+#
+# Install:
+#   helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
+#       --namespace gpu-telemetry --create-namespace \
+#       --values deploy/helm/gpu-telemetry/examples/collector-only.values.yaml \
+#       --set messagequeue.externalAddress=mq.cluster-a.example.com:9090
+
+messagequeue:
+  enabled: false
+  externalAddress: ""
+
+streamer:
+  enabled: false
+
+collector:
+  enabled: true
+  replicaCount: 4
+
+gateway:
+  enabled: false                              # gateway lives in its own cluster
+
+# This cluster runs Postgres locally so the collector has a low-latency write
+# path. Flip to false + fill in externalDatabase to point at a remote DB.
+postgresql:
+  enabled: true
+  global:
+    security:
+      allowInsecureImages: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+    tag: 16.4.0-debian-12-r14
+  auth:
+    database: gpu_telemetry
+    username: gpu_user
+    password: changeme        # OVERRIDE in production
+  primary:
+    persistence:
+      enabled: true
+      size: 50Gi

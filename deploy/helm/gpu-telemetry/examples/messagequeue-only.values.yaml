@@ -1,0 +1,36 @@
+# Cluster MQ only — runs the broker, exposes it via LoadBalancer so the
+# Streamer cluster and Collector cluster can connect to it.
+#
+# Install:
+#   helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
+#       --namespace gpu-telemetry --create-namespace \
+#       --values deploy/helm/gpu-telemetry/examples/messagequeue-only.values.yaml
+#
+# After install, find the external endpoint:
+#   kubectl --namespace gpu-telemetry get svc gpu-telemetry-messagequeue-external
+# Use that address (e.g. "mq.cluster-a.example.com:9090") in the other clusters'
+# messagequeue.externalAddress.
+
+messagequeue:
+  enabled: true
+  replicaCount: 1
+  service:
+    # LoadBalancer creates a second Service called *-messagequeue-external on
+    # top of the existing headless service. The cloud provider assigns an
+    # external IP / DNS — share that with the other clusters.
+    type: LoadBalancer
+  persistence:
+    enabled: true
+    size: 20Gi
+
+streamer:
+  enabled: false       # streamers live in their own cluster
+
+collector:
+  enabled: false       # collectors live in their own cluster
+
+gateway:
+  enabled: false       # gateway lives in its own cluster (with read access to Postgres)
+
+postgresql:
+  enabled: false       # this cluster does not run Postgres

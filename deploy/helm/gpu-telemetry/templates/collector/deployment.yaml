@@ -1,3 +1,4 @@
+{{- if .Values.collector.enabled }}
 {{- $component := "collector" }}
 apiVersion: apps/v1
 kind: Deployment
@@ -7,7 +8,15 @@ metadata:
     {{- include "gpu-telemetry.labels" . | nindent 4 }}
     app.kubernetes.io/component: {{ $component }}
 spec:
+  {{- /*
+    Only template replicas when autoscaling is OFF. When the HPA is enabled
+    (the default), it owns .spec.replicas at runtime; templating it here
+    would cause a server-side-apply field-ownership conflict every time
+    Helm tries to upgrade the chart while the HPA's value differs.
+  */ -}}
+  {{- if not .Values.collector.autoscaling.enabled }}
   replicas: {{ .Values.collector.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 6 }}
@@ -44,3 +53,4 @@ spec:
           # Kubernetes still restarts the pod if the container process exits.
           resources:
             {{- toYaml .Values.collector.resources | nindent 12 }}
+{{- end }}

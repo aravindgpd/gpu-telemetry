@@ -1,4 +1,11 @@
+{{- if .Values.messagequeue.enabled }}
 {{- $component := "messagequeue" }}
+{{- /*
+The MQ broker always gets a headless service for in-cluster DNS (other pods
+on this cluster reach it as <fullname>-messagequeue:9090). When
+service.type != ClusterIP we ALSO render a second Service named *-external
+to expose the broker to other clusters via NodePort or LoadBalancer.
+*/ -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -18,3 +25,25 @@ spec:
       targetPort: metrics
   selector:
     {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 4 }}
+{{- if ne .Values.messagequeue.service.type "ClusterIP" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gpu-telemetry.fullname" . }}-{{ $component }}-external
+  labels:
+    {{- include "gpu-telemetry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  type: {{ .Values.messagequeue.service.type }}
+  ports:
+    - name: grpc
+      port: {{ .Values.messagequeue.service.port }}
+      targetPort: grpc
+      {{- if and (eq .Values.messagequeue.service.type "NodePort") (gt (int .Values.messagequeue.service.nodePort) 0) }}
+      nodePort: {{ .Values.messagequeue.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "gpu-telemetry.selectorLabels" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}
+{{- end }}

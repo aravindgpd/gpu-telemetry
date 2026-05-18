@@ -1,0 +1,46 @@
+# Cluster Gateway — runs only the REST gateway, reads from a Postgres in a
+# different cluster. Optionally exposed via Ingress for end-user access.
+#
+# Install:
+#   helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
+#       --namespace gpu-telemetry --create-namespace \
+#       --values deploy/helm/gpu-telemetry/examples/gateway-only.values.yaml \
+#       --set externalDatabase.host=pg.cluster-b.example.com \
+#       --set externalDatabase.password=$PG_PASSWORD
+
+messagequeue:
+  enabled: false                              # gateway has no MQ dependency
+  externalAddress: ""                         # never used by gateway
+
+streamer:
+  enabled: false
+
+collector:
+  enabled: false
+
+gateway:
+  enabled: true
+  replicaCount: 3
+  ingress:
+    enabled: true
+    className: nginx
+    host: gpu-telemetry.example.com           # change to your hostname
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      - hosts: [gpu-telemetry.example.com]
+        secretName: gpu-telemetry-tls
+
+# Point at the Postgres living in the Collector cluster
+postgresql:
+  enabled: false                              # this cluster does NOT run Postgres
+
+externalDatabase:
+  host: pg.cluster-b.example.com              # set via --set or override file
+  port: 5432
+  database: gpu_telemetry
+  username: gpu_user
+  password: changeme                          # OVERRIDE — use --set or a Secret
+  # Alternative (preferred for prod):
+  # existingSecret: gpu-telemetry-pg
+  # existingSecretPasswordKey: password

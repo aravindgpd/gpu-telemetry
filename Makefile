@@ -181,8 +181,19 @@ helm-test: ## Run Helm chart tests (connection test pod)
 	helm test gpu-telemetry --namespace gpu-telemetry
 
 .PHONY: helm-uninstall
-helm-uninstall: ## Uninstall the Helm release
+helm-uninstall: ## Uninstall the Helm release (KEEPS PVCs — see `helm-uninstall-clean`)
+	@echo "Uninstalling Helm release. PVCs WILL survive (Postgres data + MQ WAL)."
+	@echo "Run 'make helm-uninstall-clean' to also reclaim storage."
 	helm uninstall gpu-telemetry --namespace gpu-telemetry
+
+.PHONY: helm-uninstall-clean
+helm-uninstall-clean: ## Uninstall + delete PVCs + delete namespace (full reset)
+	@echo "⚠  Deleting PVCs (Postgres data + MQ WAL will be lost) in 5s — Ctrl+C to abort"
+	@sleep 5
+	-helm uninstall gpu-telemetry --namespace gpu-telemetry
+	-kubectl --namespace gpu-telemetry delete pvc --all --timeout=60s
+	-kubectl delete namespace gpu-telemetry --timeout=60s
+	@echo "✓ All gpu-telemetry resources, PVCs, and the namespace are gone."
 
 ## ── Code Quality ─────────────────────────────────────────────────────────────
 

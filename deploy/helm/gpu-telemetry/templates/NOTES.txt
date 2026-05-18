@@ -45,15 +45,48 @@ dependency. To swap in a different dataset, rebuild the streamer image with
 your CSV at that path (or mount one and override $CSV_PATH).
 
 ────────────────────────────────────────────────────────────────────────────
-Scaling:
+Scaling — IMPORTANT:
 ────────────────────────────────────────────────────────────────────────────
 
-  # Scale streamers (also bumps STREAMER_TOTAL — re-render the chart)
-  helm upgrade {{ .Release.Name }} {{ .Chart.Name }} \
-      --namespace {{ .Release.Namespace }} \
-      --reuse-values --set streamer.replicaCount=4
+✋ Do NOT use `kubectl scale` on the streamer StatefulSet.
 
-  # Collectors and the gateway are HPA-controlled by default — see
-  # `kubectl get hpa --namespace {{ .Release.Namespace }}` for current state.
+The streamer pods need both STREAMER_INDEX (per-pod ordinal — auto via
+Downward API) AND STREAMER_TOTAL (fleet size — templated by Helm). `kubectl
+scale` only updates spec.replicas; it does NOT re-render the pod template,
+so STREAMER_TOTAL stays stale and new pods (ordinal >= old total) crash
+with "STREAMER_INDEX must be < STREAMER_TOTAL".
+
+  ✅ Correct — Streamer scaling (Helm rerenders the template):
+     # Run from the repo root so the chart path resolves:
+     helm upgrade {{ .Release.Name }} deploy/helm/{{ .Chart.Name }} \
+         --namespace {{ .Release.Namespace }} \
+         --reuse-values --set streamer.replicaCount=10
+
+     # Or, if your current directory IS the chart dir:
+     helm upgrade {{ .Release.Name }} . \
+         --namespace {{ .Release.Namespace }} \
+         --reuse-values --set streamer.replicaCount=10
+
+  ❌ Wrong — Helm can't find a chart by bare name:
+     helm upgrade {{ .Release.Name }} {{ .Chart.Name }} ...
+     # → "non-absolute URLs should be in form of repo_name/path_to_chart"
+     # The 2nd arg must be a PATH to the chart, not just its name.
+
+  ❌ Wrong — will crash new streamer pods:
+     kubectl --namespace {{ .Release.Namespace }} scale \
+         statefulset/{{ include "gpu-telemetry.fullname" . }}-streamer --replicas=10
+     # kubectl scale doesn't re-render the pod template, so STREAMER_TOTAL
+     # stays stale. Use the Helm command above instead.
+
+  ✅ Collectors + Gateway are HPA-controlled — leave scaling to the HPA:
+     kubectl --namespace {{ .Release.Namespace }} get hpa
+     # Manual override (Helm-managed replicas was deliberately removed for
+     # these workloads to avoid SSA conflicts with the HPA controller):
+     kubectl --namespace {{ .Release.Namespace }} scale deployment/<name> --replicas=N
+
+  ✅ Scale Postgres or MQ broker (rare): same Helm command shape as streamers.
+
+If you've already hit a crash from `kubectl scale`, run the Helm command
+above once. The rolling update fixes everything — no manual cleanup needed.
 
 ────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,31 @@
+# Cluster Streamer only — runs only streamer pods, points at an external MQ
+# broker living in a different cluster.
+#
+# Replace messagequeue.externalAddress with whatever LoadBalancer/Ingress/NodePort
+# endpoint the broker is exposed on. Format: "host:port".
+#
+# Install:
+#   helm upgrade --install gpu-telemetry deploy/helm/gpu-telemetry \
+#       --namespace gpu-telemetry --create-namespace \
+#       --values deploy/helm/gpu-telemetry/examples/streamer-only.values.yaml \
+#       --set messagequeue.externalAddress=mq.cluster-a.example.com:9090
+
+messagequeue:
+  enabled: false                              # broker is NOT installed here
+  externalAddress: ""                         # set via --set at install time
+                                              # or hard-code: "mq.cluster-a.example.com:9090"
+
+streamer:
+  enabled: true
+  replicaCount: 4
+  config:
+    streamIntervalMs: 100
+
+collector:
+  enabled: false
+
+gateway:
+  enabled: false
+
+postgresql:
+  enabled: false                              # Streamer has no DB dependency

@@ -1,5 +1,11 @@
 ## GPU Telemetry Pipeline — Helm Values
 ## Override any value with: --set key=value or --values my-values.yaml
+##
+## Multi-cluster topologies: each top-level component (messagequeue, streamer,
+## collector, gateway) has an `enabled` flag. Set the flag to false to skip
+## that component's resources; supply an `externalAddress` (where applicable)
+## to point the OTHER components at a copy living in a different cluster.
+## See deploy/helm/gpu-telemetry/examples/ for ready-made values files.
 
 global:
   imageRegistry: ""
@@ -7,12 +13,23 @@ global:
 
 # ── Message Queue Broker ───────────────────────────────────────────────────────
 messagequeue:
+  enabled: true                        # set false to NOT install broker here
+  # When this cluster does NOT run the broker, set externalAddress to point at
+  # the cluster that does, e.g. "mq.cluster-a.example.com:9090". Wins over the
+  # in-cluster service name in the mqAddress helper.
+  externalAddress: ""
   replicaCount: 1
   image:
     repository: aravindgpd/gpu-telemetry-messagequeue
     tag: dev
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   service:
+    # ClusterIP (headless): in-cluster only. Other clusters can't reach it.
+    # NodePort: any node IP on the cluster + nodePort number.
+    # LoadBalancer: cloud provider provisions an external IP/DNS name.
+    type: ClusterIP
+    # Only used when type=NodePort; leave 0 to let Kubernetes pick.
+    nodePort: 0
     port: 9090
     metricsPort: 9091
   config:
@@ -37,19 +54,25 @@ messagequeue:
 
 # ── Telemetry Streamer ─────────────────────────────────────────────────────────
 streamer:
+  enabled: true             # set false to NOT install streamer here
   replicaCount: 2           # 1–10; STREAMER_TOTAL is set automatically to this value
   image:
     repository: aravindgpd/gpu-telemetry-streamer
     tag: dev
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   config:
     mqTopic: gpu-telemetry
     streamIntervalMs: 100              # delay between streamed rows (ms)
     # CSV is baked into the streamer image at this path; override only if you
     # mount a different file via an extra volume/initContainer.
     csvPath: /data/sample_data.csv
+  # Streamer autoscaling is OFF by default. The pod template's STREAMER_TOTAL
+  # env var is rendered from .replicaCount at chart install time, so an HPA
+  # adding new pods at runtime would give them a stale STREAMER_TOTAL and they
+  # would crash (INDEX >= TOTAL). To scale streamers safely:
+  #   helm upgrade --reuse-values --set streamer.replicaCount=N
   autoscaling:
-    enabled: true
+    enabled: false
     minReplicas: 1
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
@@ -66,11 +89,12 @@ streamer:
 
 # ── Telemetry Collector ────────────────────────────────────────────────────────
 collector:
+  enabled: true             # set false to NOT install collector here
   replicaCount: 2
   image:
     repository: aravindgpd/gpu-telemetry-collector
     tag: dev
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   config:
     mqTopic: gpu-telemetry
     consumerGroup: collector-group
@@ -92,11 +116,12 @@ collector:
 
 # ── API Gateway ────────────────────────────────────────────────────────────────
 gateway:
+  enabled: true             # set false to NOT install gateway here
   replicaCount: 2
   image:
     repository: aravindgpd/gpu-telemetry-gateway
     tag: dev
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   service:
     type: ClusterIP
     port: 8080

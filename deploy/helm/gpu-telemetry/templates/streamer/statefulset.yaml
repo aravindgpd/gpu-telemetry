@@ -1,3 +1,4 @@
+{{- if .Values.streamer.enabled }}
 {{- $component := "streamer" }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -44,3 +45,4 @@ spec:
           # (see services/streamer/Dockerfile). No ConfigMap or PV needed.
           resources:
             {{- toYaml .Values.streamer.resources | nindent 12 }}
+{{- end }}
