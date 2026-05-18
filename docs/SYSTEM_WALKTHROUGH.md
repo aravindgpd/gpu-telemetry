@@ -45,44 +45,51 @@ gpu-telemetry/
 │
 └── services/
     ├── messagequeue/                ← Custom broker (the most complex piece)
-    │   ├── cmd/server/main.go       ← Entry: gRPC server + default topic provisioning
+    │   ├── cmd/server/main.go       ← Entry: gRPC server + default topic provisioning + obs sidecar
     │   └── internal/
     │       ├── broker/wal.go        ← Append-only Write-Ahead Log per partition
     │       ├── broker/partition.go  ← Ring buffer + WAL + subscriber notifications
     │       ├── broker/topic.go      ← Partition collection + round-robin
-    │       ├── broker/group.go      ← Consumer group: assignment + commits + rebalance
-    │       ├── broker/broker.go     ← Top-level orchestrator + Subscription handle
+    │       ├── broker/group.go      ← Consumer group: assignment + commits + rebalance + grace-period leave
+    │       ├── broker/broker.go     ← Top-level orchestrator + Subscription handle + scheduleStaleEviction
     │       ├── server/service.go    ← gRPC handlers (6 RPCs) → broker calls
     │       ├── server/server.go     ← gRPC server wiring
     │       ├── server/interceptors.go ← logging interceptors
+    │       ├── obs/obs.go           ← /healthz, /readyz, /metrics sidecar
     │       └── config/config.go     ← env var loader
     │
     ├── streamer/                    ← CSV reader → MQ producer
-    │   ├── cmd/server/main.go
+    │   ├── cmd/server/main.go       ← Entry: obs first, then publisher (retries until MQ is up)
     │   └── internal/
     │       ├── coordinator/coordinator.go ← Row partitioning math
     │       ├── publisher/publisher.go     ← gRPC client to MQ; bidi Publish stream
-    │       ├── reader/reader.go           ← CSV parser + replay loop
-    │       └── config/config.go
+    │       ├── publisher/retry.go         ← Exponential backoff for dependency wait
+    │       ├── reader/reader.go           ← CSV parser + replay loop (Publisher interface)
+    │       ├── obs/obs.go                 ← health/metrics sidecar (copy-paste of MQ's)
+    │       └── config/config.go           ← also validates STREAMER_INDEX vs STREAMER_TOTAL
     │
     ├── collector/                   ← MQ consumer → Postgres writer
-    │   ├── cmd/server/main.go
+    │   ├── cmd/server/main.go       ← Entry: NewPostgres retries until DB is up
     │   └── internal/
-    │       ├── consumer/consumer.go ← Subscribe loop + rebalance handling
-    │       ├── store/repository.go  ← Repository interface + structs
+    │       ├── consumer/consumer.go ← Subscribe loop + rebalance handling + grace-period skip
+    │       ├── store/repository.go  ← Repository interface + structs (incl. GPUFilter, TelemetryFilter, ModelSummary)
     │       ├── store/postgres.go    ← pgx implementation
+    │       ├── store/retry.go       ← Retry-with-backoff for pool.Ping
     │       ├── store/migrate.go     ← Versioned migrator using embed.FS
     │       ├── store/migrations/0001_initial_schema.up.sql
+    │       ├── obs/obs.go           ← health/metrics sidecar
     │       └── config/config.go
     │
     └── gateway/                     ← REST API
         ├── cmd/server/main.go
         └── internal/
-            ├── handler/router.go    ← chi router setup
-            ├── handler/gpu.go       ← ListGPUs, GetTelemetry, Healthz, Readyz
+            ├── handler/router.go    ← chi router setup + Swagger UI route
+            ├── handler/gpu.go       ← ListGPUs, GetTelemetry, QueryTelemetry, ListModels, Healthz, Readyz
             ├── handler/middleware.go ← zap logging middleware
-            ├── store/repository.go  ← read-only Repository interface
-            ├── store/postgres.go    ← pgx queries with COALESCE
+            ├── store/repository.go  ← read-only Repository interface (filters, ModelSummary, ListModels)
+            ├── store/postgres.go    ← pgx queries with COALESCE + ILIKE substring matching
+            ├── store/retry.go       ← Retry-with-backoff for pool.Ping
+            ├── docs/                ← swag-generated OpenAPI spec (embedded into binary)
             └── config/config.go
 ```
 
@@ -248,13 +255,26 @@ c.client.Acknowledge(ctx, &mqpb.AcknowledgeRequest{
 
 ### Stage 8: User queries the API
 
+The gateway serves six routes (full reference: `http://localhost:8080/swagger/index.html`):
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/gpus` | List GPUs (filters: `model_name`, `hostname` — both ILIKE substring, `limit`, `offset`) |
+| `GET /api/v1/gpus/{id}/telemetry` | Samples for one specific GPU |
+| `GET /api/v1/telemetry` | Cross-GPU samples (filters: `metric_name`, `model_name`, `uuid`, `start_time`, `end_time`, `limit`, `offset`) |
+| `GET /api/v1/models` | Distinct GPU models + counts (discovery — so callers know what `model_name` to use) |
+| `GET /healthz` / `/readyz` | Liveness + readiness |
+| `GET /swagger/*` | Interactive Swagger UI + raw `doc.json` |
+
+Per-GPU example (the simplest case):
+
 ```bash
 curl 'http://localhost:8080/api/v1/gpus/GPU-5fd4f087-.../telemetry?metric_name=DCGM_FI_DEV_GPU_UTIL&limit=50'
 ```
 
 [router.go:46](../services/gateway/internal/handler/router.go#L46) → [gpu.go:49-107](../services/gateway/internal/handler/gpu.go#L49) — `GetTelemetry`:
 1. Pull `id` from path, query params from URL
-2. Validate types (RFC3339 times, integer limits)
+2. Validate types (RFC3339 times, integer limits) via the shared `parseLimit`/`parseOffset`/`parseTime` helpers
 3. Cap `limit` at `MaxLimit` (1000)
 4. Call `db.GetTelemetry(uuid, metric, start, end, limit, offset)`
 
@@ -271,7 +291,61 @@ ORDER BY sample_at ASC
 LIMIT $5 OFFSET $6
 ```
 
-[gpu.go:106](../services/gateway/internal/handler/gpu.go#L106) marshals the result to JSON and writes it. End of journey.
+[gpu.go:106](../services/gateway/internal/handler/gpu.go#L106) marshals the result to JSON and writes it.
+
+#### Stage 8b: Cross-GPU search via `/api/v1/telemetry`
+
+For "GPU_UTIL across every H100 in the last 5 minutes", the per-GPU endpoint would require N round trips. Instead:
+
+```bash
+curl 'http://localhost:8080/api/v1/telemetry?metric_name=DCGM_FI_DEV_GPU_UTIL&model_name=h100&limit=200'
+```
+
+[gpu.go QueryTelemetry handler](../services/gateway/internal/handler/gpu.go) calls `db.QueryTelemetry(filter)`, which runs:
+
+```sql
+SELECT ts.id, ts.uuid, ts.metric_name, ts.ingested_at, ts.sample_at, ts.value, ...
+FROM telemetry_samples ts
+JOIN gpus g ON ts.uuid = g.uuid
+WHERE ($1::text        IS NULL OR ts.uuid        = $1)
+  AND ($2::text        IS NULL OR ts.metric_name = $2)
+  AND ($3::text        IS NULL OR g.model_name  ILIKE $3)   -- ← substring match
+  AND ($4::timestamptz IS NULL OR ts.sample_at  >= $4)
+  AND ($5::timestamptz IS NULL OR ts.sample_at  <= $5)
+ORDER BY ts.sample_at ASC
+LIMIT $6 OFFSET $7
+```
+
+Two design notes:
+
+1. **ILIKE substring for `model_name` and `hostname`.** The repo wraps user input in `%...%` via the `likeArg` helper ([gateway/store/postgres.go](../services/gateway/internal/store/postgres.go)). So `?model_name=h100` matches `"NVIDIA H100 80GB HBM3"`. The user input is passed as a bound parameter — no SQL injection. UUIDs and metric names stay exact-match because they're stable identifiers.
+
+2. **JOIN against `gpus`.** Required because `telemetry_samples` doesn't carry `model_name`. The unconditional JOIN is cheap at our scale (≤ a few thousand GPU rows); at production scale you'd denormalise `model_name` into the fact table.
+
+#### Stage 8c: Discovery via `/api/v1/models`
+
+Solves "what `model_name` values are accepted?" — instead of trial-and-error:
+
+```bash
+curl http://localhost:8080/api/v1/models
+# [
+#   {"model_name": "NVIDIA H100 80GB HBM3", "gpu_count": 12},
+#   {"model_name": "NVIDIA A100 40GB",      "gpu_count":  4}
+# ]
+```
+
+[gpu.go ListModels handler](../services/gateway/internal/handler/gpu.go) calls `db.ListModels()`:
+
+```sql
+SELECT model_name, COUNT(*)::int AS gpu_count
+FROM gpus
+GROUP BY model_name
+ORDER BY gpu_count DESC, model_name ASC
+```
+
+Most-common model first; alphabetical tie-break for stable output.
+
+End of journey.
 
 ---
 
@@ -410,6 +484,24 @@ for id, m := range g.members {
 ```
 
 This is the key "no thrashing" property: when the same fleet reconnects after a churn event, the `computeAssignments` function returns the same map, so subsequent Joins don't trigger more evictions.
+
+**Grace-period leave to avoid double-rebalance.** Without further protection, the rebalance signal would cause a second problem: when a Subscribe handler exits because its `done` channel closed, calling `group.Leave(memberID)` immediately would recompute assignments AGAIN as if the member had disappeared — kicking off a cascading rebalance. The fix has two parts:
+
+1. **[Subscription.SkipLeaveOnCleanup()](../services/messagequeue/internal/broker/broker.go#L302)** — the gRPC handler sets this flag right before returning when the exit reason is a rebalance signal (not a real disconnect). `Cleanup()` then unregisters from partitions but does NOT call `group.Leave` immediately.
+2. **[scheduleStaleEviction()](../services/messagequeue/internal/broker/broker.go#L330)** — a `time.AfterFunc(30s, ...)` callback. If the consumer reconnects within 30 seconds, `Join` replaces the `*groupMember` pointer, so the timer's pointer-equality check ([group.go:110-118](../services/messagequeue/internal/broker/group.go#L110)) sees a mismatch and bails out — no eviction. If the consumer never returns (pod crash + replaced by a pod with a different consumer_id), the timer fires and properly removes the stale entry.
+
+```go
+// group.go — the pointer-equality guard
+func (g *consumerGroup) LeaveIfSameMember(memberID string, expected *groupMember) (bool, []*groupMember) {
+    cur, ok := g.members[memberID]
+    if !ok || cur != expected {
+        return false, nil    // ← consumer re-Subscribed; new pointer; abort
+    }
+    return true, g.leaveLocked(memberID)
+}
+```
+
+Without this two-layer protection, every rebalance triggered a follow-up rebalance, doubling churn. Verified by `TestGroupLeaveIfSameMemberWhenReplaced` and `TestGroupLeaveIfSameMemberWhenStill` in [group_test.go](../services/messagequeue/internal/broker/group_test.go).
 
 ### 4.4 The broker orchestrator ([broker.go](../services/messagequeue/internal/broker/broker.go))
 
@@ -571,7 +663,7 @@ rpc Subscribe(SubscribeRequest) returns (stream DeliveryMessage);
 
 | Service | Variable | Default | Purpose |
 |---|---|---|---|
-| **All** | `METRICS_PORT` | 9091 | Prometheus scrape (not yet wired) |
+| **All** | `METRICS_PORT` | 9091 | `/healthz`, `/readyz`, `/metrics` HTTP endpoint (served by [obs package](../services/messagequeue/internal/obs/obs.go) in MQ/streamer/collector; built into gateway router) |
 | **MQ** | `GRPC_PORT` | 9090 | gRPC listen |
 | | `MQ_PARTITIONS` | 10 | Partitions per topic at creation |
 | | `MQ_RING_BUFFER_SIZE` | 65536 | Slots per partition (must be power of 2) |
@@ -650,33 +742,124 @@ Scenario: Broker pod crashes after publishing offset 47 to partition 0 but befor
 
 For stronger durability, set `MQ_WAL_SYNC_BYTES=0` (sync every record). Pays in throughput. Default 4096 is a reasonable middle.
 
----
+### 8.6 The observability sidecar
 
-## 9. What's Missing (Day 2+)
+A small [`obs` package](../services/messagequeue/internal/obs/obs.go) (copied into MQ, Streamer, Collector) starts an HTTP server on `METRICS_PORT` (default 9091) that exposes:
 
-| Area | Status |
+| Path | Behaviour |
 |---|---|
-| Proto generation | ✅ Working |
-| All services compile | ✅ Working |
-| MQ broker logic | ✅ Complete |
-| **Dockerfiles** | ❌ Day 2 |
-| **docker-compose.yml** | ❌ Day 2 |
-| **Makefile** | ❌ Day 2 |
-| **OpenAPI generation** | ❌ Day 2 (annotations exist; need `swag init` pipeline) |
-| `/metrics` endpoints | ❌ Day 2 (config has the port; no server) |
-| Helm charts | ❌ Day 4 |
-| Unit tests | ❌ Day 3 |
-| README + AI usage doc | ❌ Day 5 |
-| Final smoke test | ❌ Day 2 (after compose) |
+| `/healthz` | Always returns 200 — used by Kubernetes liveness probes. Answers immediately, even while the service is waiting for an upstream dependency. |
+| `/readyz` | Calls a `ReadyFunc` supplied by main.go. Collector wires it to `db.Ping`; MQ + Streamer have no real readiness signal yet so they return 200 unconditionally. |
+| `/metrics` | Default Prometheus collectors (Go runtime, process). Domain counters are not yet wired — documented as a follow-up. |
+
+The Gateway has its own HTTP server (the REST API), so it serves these routes directly through the chi router rather than via a sidecar. `/swagger/*` lives on the same port.
 
 ---
 
-## 10. The Three Mental Models to Carry Forward
+## 9. Resilient startup — any order, any machine
 
-If you internalize three things from this walkthrough, these are them:
+Every service tolerates its dependencies being down at startup. Instead of crash-looping until Kubernetes gives up, each one **waits politely with exponential backoff** until the dependency is reachable.
 
-**(a) Partitions are how the queue says "yes you can scale, but only this far."** They give per-partition ordering and consumer parallelism, but cap consumers at N (= partition count) per group. Every scaling decision in this system flows from partition count.
+### 9.1 The retry helper
 
-**(b) Offsets are forever; slots are ephemeral.** Offset = monotonic logical position. Slot = `offset % capacity` physical position in RAM. Ring buffer overwrites slots. Disk WAL preserves the logical history. Consumer cursors track offsets, not slots.
+Three copies live in the codebase, structurally identical:
+- [services/streamer/internal/publisher/retry.go](../services/streamer/internal/publisher/retry.go)
+- [services/collector/internal/store/retry.go](../services/collector/internal/store/retry.go)
+- [services/gateway/internal/store/retry.go](../services/gateway/internal/store/retry.go)
 
-**(c) Idempotency lives at the database layer, not the app layer.** The `UNIQUE(uuid, metric_name, sample_at)` constraint is what makes everything else simple. With it, collectors don't coordinate, MQ is at-least-once, retries are free. Without it, you'd need locks, leader election, application-level dedup tables — a much bigger system.
+```go
+func retryWithBackoff(ctx context.Context, logger *zap.Logger, label string, fn func(context.Context) error) error {
+    backoff := 200 * time.Millisecond
+    const maxWait = 10 * time.Second
+    for {
+        if err := fn(ctx); err == nil { return nil }
+        // ... log "waiting for dependency", select on ctx.Done() vs time.After(backoff),
+        //     then double backoff up to maxWait
+    }
+}
+```
+
+Three packages → three copies → ~90 lines of duplication. Centralising would mean a shared utility module that's awkward in the workspace layout. Standard Go practice at this scale.
+
+### 9.2 Where it's used
+
+| Service | What it waits for | File |
+|---|---|---|
+| Streamer | MQ broker — wraps `CreateTopic` + `Publish` stream open | [publisher.go](../services/streamer/internal/publisher/publisher.go) |
+| Collector | Postgres — wraps `pool.Ping` | [collector store/postgres.go](../services/collector/internal/store/postgres.go) |
+| Collector | MQ broker — `runOnce` reconnect loop, already in [consumer.go:71-83](../services/collector/internal/consumer/consumer.go#L71) |
+| Gateway | Postgres — wraps `pool.Ping` | [gateway store/postgres.go](../services/gateway/internal/store/postgres.go) |
+
+### 9.3 What you see in logs during a wait
+
+```json
+{"level":"warn","msg":"waiting for dependency","op":"CreateTopic","attempt":1,"next_retry_in":"200ms","error":"connection refused"}
+{"level":"warn","msg":"waiting for dependency","op":"CreateTopic","attempt":2,"next_retry_in":"400ms","error":"connection refused"}
+...
+{"level":"info","msg":"dependency reachable","op":"CreateTopic","attempts":7}
+```
+
+The operator immediately sees *which* dependency is missing, how long it's been waiting, and exactly when the wait ended.
+
+### 9.4 The signal-cancellation contract
+
+The retry loop selects on `ctx.Done()`, so SIGTERM during the wait exits cleanly rather than blocking shutdown. The streamer's main.go starts the `obs` sidecar FIRST so liveness probes pass during the dependency wait:
+
+```go
+// streamer/cmd/server/main.go
+obsServer := obs.Start(cfg.MetricsPort, logger, nil)    // /healthz answers immediately
+pub, err := publisher.New(ctx, cfg, logger)             // may block waiting for MQ
+```
+
+If a kubelet sends SIGTERM while still waiting for MQ, the ctx cancels, `publisher.New` returns `context.Canceled`, main treats it as a clean shutdown, and the pod terminates without ever spamming alarming "CrashLoopBackOff" events.
+
+---
+
+## 10. Multi-cluster topology
+
+Every service can be installed in any subset of clusters. Three escape hatches make cross-cluster wiring work:
+
+| Knob | Used when | What it does |
+|---|---|---|
+| `messagequeue.enabled = false` | This cluster does NOT run the broker | All MQ resources (StatefulSet, Service, PVC) are skipped |
+| `messagequeue.externalAddress` | This cluster needs to TALK to a broker elsewhere | `mqAddress` helper returns this `host:port` instead of the in-cluster DNS name |
+| `messagequeue.service.type = LoadBalancer` (or `NodePort`) | This cluster runs the broker AND needs to expose it | Renders a second `*-external` Service alongside the headless one |
+| `postgresql.enabled = false` + `externalDatabase.*` | This cluster uses a Postgres elsewhere | DSN built from `externalDatabase` instead of the Bitnami subchart |
+
+### 10.1 The `mqAddress` helper (the resolution rule)
+
+[deploy/helm/gpu-telemetry/templates/_helpers.tpl](../deploy/helm/gpu-telemetry/templates/_helpers.tpl):
+
+```go
+{{- define "gpu-telemetry.mqAddress" -}}
+{{- if .Values.messagequeue.externalAddress }}
+{{- .Values.messagequeue.externalAddress }}            // 1. explicit external wins
+{{- else if .Values.messagequeue.enabled }}
+{{- printf "%s-messagequeue:%d" (...) (...) }}         // 2. in-cluster DNS
+{{- else }}
+{{- fail "..." }}                                       // 3. neither → fail fast
+{{- end }}
+{{- end }}
+```
+
+Both the streamer and the collector use this same helper to populate their `MQ_ADDRESS` env var. One knob → both services in sync, no chance of misconfiguration.
+
+### 10.2 Four canonical topologies + example values
+
+The chart ships four example values files in [deploy/helm/gpu-telemetry/examples/](../deploy/helm/gpu-telemetry/examples/) covering:
+
+| File | Cluster role |
+|---|---|
+| `messagequeue-only.values.yaml` | Just the broker, LoadBalancer-exposed |
+| `streamer-only.values.yaml` | Just the streamer, pointing at external MQ |
+| `collector-only.values.yaml` | Collector + Postgres, external MQ |
+| `gateway-only.values.yaml` | Gateway + Ingress, external Postgres |
+
+Full installation procedure in **[docs/MULTI_CLUSTER.md](MULTI_CLUSTER.md)** — including the LoadBalancer endpoint discovery, the streamer.csvData flow, and per-cluster sanity checks.
+
+### 10.3 Why streamer + collector don't have their own `externalAddress`
+
+Direction of connection. Both streamer and collector are pure **clients** of the broker — they OPEN the gRPC connection, the broker pushes data over the already-open socket. Nothing ever dials into a streamer or collector pod (Prometheus scrape and kubelet probes are cluster-local).
+
+Server-side components (MQ broker, Postgres, Gateway) get `externalAddress`/`externalDatabase.host`/`ingress.host` respectively. Client-side components (Streamer, Collector) don't, because they have nothing to be reached at.
+
